@@ -168,6 +168,7 @@ pub fn frame(
         let weapon = match me.weapon {
             Weapon::Bazooka => "BAZOOKA [1]",
             Weapon::Grenade => "GRENADE [2]",
+            Weapon::Meteor => "METEOR",
         };
         let state = if me.respawn_ticks > 0 {
             format!("RESPAWN {:.1}s", me.respawn_ticks as f32 / TICK_RATE as f32)
@@ -184,7 +185,7 @@ pub fn frame(
         push_terminal_line(
             &mut out,
             &format!(
-                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+}d FRAGS:{} D:{} P:{}",
+                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+}d FRAGS:{} D:{} P:{} E:{}%",
                 me.name,
                 state,
                 weapon,
@@ -192,7 +193,13 @@ pub fn frame(
                 me.aim as i32 * 90 / 8,
                 me.kills,
                 me.deaths,
-                game.players.len()
+                game.players.len(),
+                game.tiles
+                    .iter()
+                    .filter(|t| matches!(t, Tile::Earth))
+                    .count()
+                    * 100
+                    / (WIDTH * HEIGHT)
             ),
             terminal_width,
         );

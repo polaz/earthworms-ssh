@@ -27,8 +27,10 @@ const FIRE_RELEASE_SILENCE: u64 = TICK_RATE / 4;
 pub const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
 pub const POWER_STEP_TICKS: u64 = TICK_RATE / 10;
 pub const POWER_STEP_PERCENT: u32 = 5;
-const MAX_PROJECTILE_SPEED: f32 = 9.5 * V_SCALE;
-const TERRAIN_CAP: usize = WIDTH * HEIGHT / 2;
+const MAX_PROJECTILE_SPEED: f32 = 6.4 * V_SCALE;
+const TERRAIN_CAP: usize = WIDTH * HEIGHT * 3 / 5;
+const METEOR_INTERVAL_TICKS: u64 = TICK_RATE * 20;
+const METEOR_OWNER: PlayerId = u64::MAX;
 const MOVE_SUBSTEP: f32 = 0.9;
 const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
 const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
@@ -118,6 +120,17 @@ const MUTUAL_VERBS: &[&str] = &[
     "achieved mutually assured deletion",
 ];
 
+const METEOR_VERBS: &[&str] = &[
+    "got cosmically yeeted",
+    "made a fossil of themselves",
+    "lost an argument with a falling rock",
+    "served as the dinosaurs' revenge target",
+    "found out about gravity from space",
+    "was selected by the heavens",
+    "starred in their own extinction event",
+    "received express delivery from the void",
+];
+
 const JOIN_VERBS: &[&str] = &[
     "tunneled into the arena",
     "wormed in",
@@ -189,6 +202,7 @@ pub enum Tile {
 pub enum Weapon {
     Bazooka,
     Grenade,
+    Meteor,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +273,7 @@ pub struct Game {
     rng: SmallRng,
     clients: HashMap<PlayerId, Client>,
     next_growth_tick: u64,
+    next_meteor_tick: u64,
     hang: Vec<u16>,
     cohesion: Vec<u8>,
     pending_kills: Vec<(PlayerId, PlayerId)>,
@@ -276,6 +291,7 @@ impl Game {
             rng: SmallRng::seed_from_u64(seed),
             clients: HashMap::new(),
             next_growth_tick: 40,
+            next_meteor_tick: METEOR_INTERVAL_TICKS,
             hang: vec![0; WIDTH * HEIGHT],
             cohesion: vec![0; WIDTH * HEIGHT],
             pending_kills: Vec::new(),
@@ -350,6 +366,10 @@ impl Game {
             let delay_sec = 3.0 + fill * fill * 25.0;
             let delay = (delay_sec * TICK_RATE as f32) as u64;
             self.next_growth_tick = self.tick_number + delay.max(TICK_RATE * 3);
+        }
+        if self.tick_number >= self.next_meteor_tick {
+            self.spawn_meteor();
+            self.next_meteor_tick = self.tick_number + METEOR_INTERVAL_TICKS;
         }
         self.blasts.retain_mut(|blast| {
             blast.age += 1;
@@ -684,6 +704,7 @@ impl Game {
             let (radius, max_dmg) = match weapon {
                 Weapon::Bazooka => (4 * WORLD_SCALE as i32, 800.0),
                 Weapon::Grenade => (8 * WORLD_SCALE as i32, 1200.0),
+                Weapon::Meteor => (12 * WORLD_SCALE as i32, 1500.0),
             };
             self.explode(x.round() as i32, y.round() as i32, radius, max_dmg, owner);
         }
@@ -754,7 +775,10 @@ impl Game {
                 .get(&v1)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            if mutual.is_some() {
+            if k1 == METEOR_OWNER {
+                let verb = METEOR_VERBS[self.rng.random_range(0..METEOR_VERBS.len())];
+                self.say(format!("{v1_name} {verb}"));
+            } else if mutual.is_some() {
                 let k1_name = self
                     .players
                     .get(&k1)
@@ -787,6 +811,23 @@ impl Game {
                 }
             }
         }
+    }
+
+    fn spawn_meteor(&mut self) {
+        let x = self.rng.random_range(20..(WIDTH as i32 - 20)) as f32;
+        let vx = self.rng.random_range(-0.4..=0.4);
+        let vy = self.rng.random_range(2.5..=4.0);
+        self.projectiles.push(Projectile {
+            x,
+            y: -SCALE,
+            glyph: '@',
+            owner: METEOR_OWNER,
+            weapon: Weapon::Meteor,
+            vx,
+            vy,
+            fuse: TICK_RATE as u16 * 6,
+        });
+        self.say("a meteor screams down from the sky".into());
     }
 
     fn grow_terrain(&mut self) {
@@ -927,7 +968,10 @@ impl Game {
             let Some(top) = self.surface_height(x) else {
                 continue;
             };
-            if top + 1 < HEIGHT as i32 && self.tile(x, top + 1) != Tile::Earth {
+            if top >= HEIGHT as i32 - 1 {
+                continue;
+            }
+            if self.tile(x, top + 1) != Tile::Earth {
                 continue;
             }
             let left = self.surface_height(x - 1).unwrap_or(HEIGHT as i32);
@@ -1087,10 +1131,12 @@ impl Player {
         self.fire_cooldown = match self.weapon {
             Weapon::Bazooka => 12,
             Weapon::Grenade => 20,
+            Weapon::Meteor => 0,
         };
         let weapon_factor = match self.weapon {
             Weapon::Bazooka => 1.0,
-            Weapon::Grenade => 0.55,
+            Weapon::Grenade => 0.45,
+            Weapon::Meteor => 1.0,
         };
         let speed = MAX_PROJECTILE_SPEED * power_pct as f32 / 100.0 * weapon_factor;
         let angle = self.aim as f32 * std::f32::consts::PI / 16.0;
@@ -1102,6 +1148,7 @@ impl Player {
             glyph: match self.weapon {
                 Weapon::Bazooka => '*',
                 Weapon::Grenade => 'o',
+                Weapon::Meteor => '@',
             },
             owner: self.id,
             weapon: self.weapon,
@@ -1110,6 +1157,7 @@ impl Player {
             fuse: match self.weapon {
                 Weapon::Bazooka => 200,
                 Weapon::Grenade => 240,
+                Weapon::Meteor => 200,
             },
         }
     }
@@ -1214,17 +1262,18 @@ mod tests {
     }
 
     #[test]
-    fn terrain_growth_never_exceeds_half_of_the_arena() {
+    fn terrain_growth_respects_the_cap() {
         let mut game = Game::new(3);
         game.tiles.fill(Tile::Earth);
-        for cell in game.tiles.iter_mut().take(WIDTH * HEIGHT / 2) {
+        for cell in game.tiles.iter_mut().take(WIDTH * HEIGHT / 3) {
             *cell = Tile::Air;
         }
-        assert_eq!(game.earth_count(), WIDTH * HEIGHT / 2);
+        let before = game.earth_count();
+        assert!(before >= TERRAIN_CAP);
 
         game.grow_terrain();
 
-        assert_eq!(game.earth_count(), WIDTH * HEIGHT / 2);
+        assert_eq!(game.earth_count(), before);
     }
 
     #[test]
