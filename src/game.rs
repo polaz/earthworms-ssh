@@ -1327,8 +1327,8 @@ impl Player {
             Weapon::Meteor => 0,
         };
         let weapon_factor = match self.weapon {
-            Weapon::Bazooka => 1.0,
-            Weapon::Grenade => 0.45,
+            Weapon::Bazooka => 1.2,
+            Weapon::Grenade => 0.9,
             Weapon::Meteor => 1.0,
         };
         let speed = MAX_PROJECTILE_SPEED * power_pct as f32 / 100.0 * weapon_factor;
