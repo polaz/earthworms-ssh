@@ -10,29 +10,38 @@ pub const NATIVE_HEIGHT: usize = 18;
 pub const WORLD_SCALE: usize = 4;
 pub const WIDTH: usize = NATIVE_WIDTH * WORLD_SCALE;
 pub const HEIGHT: usize = NATIVE_HEIGHT * WORLD_SCALE;
-pub const TICK_RATE: u64 = 20;
+pub const TICK_RATE: u64 = 50;
+const REF_RATE: f32 = 20.0;
+const V_SCALE: f32 = REF_RATE / TICK_RATE as f32;
+const A_SCALE: f32 = V_SCALE * V_SCALE;
 const SCALE: f32 = WORLD_SCALE as f32;
-const GRAVITY: f32 = 0.11 * SCALE;
-const MAX_FALL: f32 = 1.45 * SCALE;
-const MOVE_ACCEL: f32 = 0.18 * SCALE;
-const MAX_RUN: f32 = 0.65 * SCALE;
-const FRICTION: f32 = 0.72;
-const SLIDE_ACCEL: f32 = 0.12 * SCALE;
+const GRAVITY: f32 = 0.11 * SCALE * A_SCALE / Y_ASPECT;
+const MAX_FALL: f32 = 1.45 * SCALE * V_SCALE / Y_ASPECT;
+const MOVE_ACCEL: f32 = 0.18 * SCALE * A_SCALE;
+const MAX_RUN: f32 = 0.65 * SCALE * V_SCALE;
+const FRICTION: f32 = 0.876;
+const SLIDE_ACCEL: f32 = 0.12 * SCALE * A_SCALE;
 const SLIDE_LOOKAHEAD: i32 = 2;
 const SLIDE_DROP_THRESHOLD: i32 = 4;
 const FIRE_RELEASE_SILENCE: u64 = TICK_RATE / 4;
 const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
-const POWER_STEP_TICKS: u64 = 2;
+const POWER_STEP_TICKS: u64 = TICK_RATE / 10;
 const POWER_STEP_PERCENT: u32 = 5;
-const MAX_PROJECTILE_SPEED: f32 = 9.5;
+const MAX_PROJECTILE_SPEED: f32 = 9.5 * V_SCALE;
 const TERRAIN_CAP: usize = WIDTH * HEIGHT / 2;
 const MOVE_SUBSTEP: f32 = 0.9;
-const FRICTION_GRACE_TICKS: u64 = 3;
+const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
 const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
 const TALUS: i32 = 2;
-const SLIDE_PROBABILITY: f64 = 0.5;
+const SLIDE_BASE_PROBABILITY: f64 = 0.55;
+const GROWTH_REGION_FRACTION: i32 = 8;
+const GROWTH_HEIGHT_CAP_PCT: i32 = 30;
+const GROWTH_MIN_BURST: usize = 3;
+const GROWTH_MAX_BURST: usize = 18;
 pub const MAX_HEALTH: i16 = 1000;
-const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 10;
+const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
+const Y_ASPECT: f32 = 1.7;
+const AIM_COOLDOWN_TICKS: u64 = TICK_RATE / 8;
 const FEED_TTL_TICKS: u64 = TICK_RATE * 8;
 
 const FRAG_VERBS: &[&str] = &[
@@ -209,6 +218,7 @@ pub struct Player {
     last_direction: i8,
     last_input_tick: u64,
     regen_carry: i32,
+    next_aim_tick: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +262,7 @@ pub struct Game {
     clients: HashMap<PlayerId, Client>,
     next_growth_tick: u64,
     hang: Vec<u16>,
+    cohesion: Vec<u8>,
     pending_kills: Vec<(PlayerId, PlayerId)>,
 }
 
@@ -268,6 +279,7 @@ impl Game {
             clients: HashMap::new(),
             next_growth_tick: 40,
             hang: vec![0; WIDTH * HEIGHT],
+            cohesion: vec![0; WIDTH * HEIGHT],
             pending_kills: Vec::new(),
         };
         game.generate_world();
@@ -337,8 +349,9 @@ impl Game {
             self.grow_terrain();
             let earth = self.earth_count();
             let fill = (earth as f32 / TERRAIN_CAP as f32).clamp(0.0, 1.0);
-            let delay = (4.0 + fill * fill * 96.0) as u64;
-            self.next_growth_tick = self.tick_number + delay.max(2);
+            let delay_sec = 3.0 + fill * fill * 17.0;
+            let delay = (delay_sec * TICK_RATE as f32) as u64;
+            self.next_growth_tick = self.tick_number + delay.max(TICK_RATE * 3);
         }
         self.blasts.retain_mut(|blast| {
             blast.age += 1;
@@ -393,7 +406,18 @@ impl Game {
 
     fn set_tile(&mut self, x: i32, y: i32, tile: Tile) {
         if x >= 0 && y >= 0 && x < WIDTH as i32 && y < HEIGHT as i32 {
-            self.tiles[y as usize * WIDTH + x as usize] = tile;
+            let idx = y as usize * WIDTH + x as usize;
+            self.tiles[idx] = tile;
+            if tile == Tile::Air {
+                self.cohesion[idx] = 0;
+            }
+        }
+    }
+
+    fn seed_cohesion(&mut self, x: i32, y: i32) {
+        if x >= 0 && y >= 0 && x < WIDTH as i32 && y < HEIGHT as i32 {
+            let idx = y as usize * WIDTH + x as usize;
+            self.cohesion[idx] = self.rng.random_range(1..=3);
         }
     }
 
@@ -404,6 +428,7 @@ impl Game {
                 .clamp((HEIGHT / 2) as i32, (HEIGHT - 6) as i32);
             for y in surface..HEIGHT as i32 {
                 self.set_tile(x, y, Tile::Earth);
+                self.seed_cohesion(x, y);
             }
         }
         for _ in 0..10 {
@@ -459,8 +484,14 @@ impl Game {
                     }
                 }
                 match terminator {
-                    Some(b'A') => player.aim = (player.aim - 1).clamp(-8, 8),
-                    Some(b'B') => player.aim = (player.aim + 1).clamp(-8, 8),
+                    Some(b'A') if tick >= player.next_aim_tick => {
+                        player.aim = (player.aim - 1).clamp(-8, 8);
+                        player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                    }
+                    Some(b'B') if tick >= player.next_aim_tick => {
+                        player.aim = (player.aim + 1).clamp(-8, 8);
+                        player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                    }
                     Some(b'C') => player.pulse_move(1, tick),
                     Some(b'D') => player.pulse_move(-1, tick),
                     _ => {}
@@ -471,8 +502,14 @@ impl Game {
                 b'a' | b'A' => player.pulse_move(-1, tick),
                 b'd' | b'D' => player.pulse_move(1, tick),
                 b' ' => player.jump = true,
-                b'w' | b'W' | b'j' | b'J' => player.aim = (player.aim - 1).clamp(-8, 8),
-                b's' | b'S' | b'l' | b'L' => player.aim = (player.aim + 1).clamp(-8, 8),
+                b'w' | b'W' | b'j' | b'J' if tick >= player.next_aim_tick => {
+                    player.aim = (player.aim - 1).clamp(-8, 8);
+                    player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                }
+                b's' | b'S' | b'l' | b'L' if tick >= player.next_aim_tick => {
+                    player.aim = (player.aim + 1).clamp(-8, 8);
+                    player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                }
                 b'1' => player.weapon = Weapon::Bazooka,
                 b'2' => player.weapon = Weapon::Grenade,
                 b'\r' | b'\n' | b'x' | b'X' | b'f' | b'F' => {
@@ -533,7 +570,7 @@ impl Game {
                     player.vx *= FRICTION;
                 }
                 if player.jump && grounded {
-                    player.vy = -(0.7 * SCALE) - player.vx.abs() * 0.3;
+                    player.vy = (-(0.7 * SCALE) - player.vx.abs() * 0.3) * V_SCALE / Y_ASPECT;
                 }
                 player.vy = (player.vy + GRAVITY).min(MAX_FALL);
                 if let Some(start) = player.charge_started
@@ -677,8 +714,8 @@ impl Game {
             let damage = ((radius as f32 + 2.0 - distance) * scale)
                 .clamp(MIN_BLAST_DAMAGE as f32, MAX_BLAST_DAMAGE) as i16;
             player.health -= damage;
-            player.vx += dx.signum() * 0.8 * SCALE;
-            player.vy = -0.7 * SCALE;
+            player.vx += dx.signum() * 0.8 * SCALE * V_SCALE;
+            player.vy = -0.7 * SCALE * V_SCALE / Y_ASPECT;
             if player.health <= 0 {
                 player.deaths += 1;
                 player.respawn_ticks = (TICK_RATE * 3) as u16;
@@ -760,19 +797,28 @@ impl Game {
             return;
         }
         let deficit = (TERRAIN_CAP - earth) as f32 / TERRAIN_CAP as f32;
-        let coef = (WORLD_SCALE * WORLD_SCALE * 64) as f32;
-        let burst = ((deficit * deficit * coef) as usize)
-            .max(1)
+        let burst = ((deficit * GROWTH_MAX_BURST as f32) as usize)
+            .clamp(GROWTH_MIN_BURST, GROWTH_MAX_BURST)
             .min(TERRAIN_CAP - earth);
+
+        let region_width = (WIDTH as i32 / GROWTH_REGION_FRACTION).max(2);
+        let region_start = self
+            .rng
+            .random_range(1..((WIDTH as i32 - 1).saturating_sub(region_width)).max(2));
+        let region_end = (region_start + region_width).min(WIDTH as i32 - 1);
+        let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
 
         let mut placed = 0;
         let mut attempts = 0;
         while placed < burst && attempts < burst * 8 {
             attempts += 1;
-            let x = self.rng.random_range(1..(WIDTH - 1)) as i32;
+            let x = self.rng.random_range(region_start..region_end);
             let Some((_, top)) = self.supported_growth_site(x) else {
                 continue;
             };
+            if top < max_top_y {
+                continue;
+            }
             let left = self.surface_height(x - 1).unwrap_or(HEIGHT as i32);
             let right = self.surface_height(x + 1).unwrap_or(HEIGHT as i32);
             let neighbor_floor = left.max(right);
@@ -787,6 +833,7 @@ impl Game {
                     break;
                 }
                 self.set_tile(x, y, Tile::Earth);
+                self.seed_cohesion(x, y);
                 self.hang[y as usize * WIDTH + x as usize] = 0;
                 placed += 1;
             }
@@ -812,9 +859,11 @@ impl Game {
                 if self.tile(x, y + 1) == Tile::Air {
                     self.hang[idx] = self.hang[idx].saturating_add(1);
                     if self.hang[idx] >= HANG_FALL_DELAY {
+                        let prev_cohesion = self.cohesion[idx].max(1);
                         self.set_tile(x, y, Tile::Air);
                         self.set_tile(x, y + 1, Tile::Earth);
                         let below = (y + 1) as usize * WIDTH + x as usize;
+                        self.cohesion[below] = prev_cohesion;
                         self.hang[below] = self.hang[idx];
                         self.hang[idx] = 0;
                     }
@@ -848,7 +897,9 @@ impl Game {
             if left_diff < TALUS && right_diff < TALUS {
                 continue;
             }
-            if !self.rng.random_bool(SLIDE_PROBABILITY) {
+            let cohesion = self.cohesion[top as usize * WIDTH + x as usize].max(1) as f64;
+            let slide_p = (SLIDE_BASE_PROBABILITY / cohesion).clamp(0.05, 0.9);
+            if !self.rng.random_bool(slide_p) {
                 continue;
             }
             let go_left = match left_diff.cmp(&right_diff) {
@@ -867,8 +918,10 @@ impl Game {
             if target_y < 0 || self.tile(nx, target_y) != Tile::Air {
                 continue;
             }
+            let prev_cohesion = self.cohesion[top as usize * WIDTH + x as usize];
             self.set_tile(x, top, Tile::Air);
             self.set_tile(nx, target_y, Tile::Earth);
+            self.cohesion[target_y as usize * WIDTH + nx as usize] = prev_cohesion.max(1);
             self.hang[top as usize * WIDTH + x as usize] = 0;
             self.hang[target_y as usize * WIDTH + nx as usize] = 0;
         }
@@ -903,7 +956,7 @@ impl Game {
                 }
             } else if let Some(player) = self.players.get_mut(&id) {
                 player.y = y;
-                player.vy = player.vy.min(-0.25 * SCALE);
+                player.vy = player.vy.min(-0.25 * SCALE * V_SCALE / Y_ASPECT);
             }
         }
         for (_, name) in buried {
@@ -950,6 +1003,7 @@ impl Player {
             last_direction: 0,
             last_input_tick: 0,
             regen_carry: 0,
+            next_aim_tick: 0,
         }
     }
 
@@ -961,6 +1015,11 @@ impl Player {
         self.vx = 0.0;
         self.vy = 0.0;
         self.regen_carry = 0;
+        self.charge_started = None;
+        self.last_charge_pulse = None;
+        self.fire_cooldown = 0;
+        self.move_impulse = 0.0;
+        self.jump = false;
     }
 
     fn pulse_move(&mut self, direction: i8, tick: u64) {
@@ -973,7 +1032,7 @@ impl Player {
         }
         let held_ticks = tick.saturating_sub(self.movement_started).min(24);
         let acceleration = if gap <= 4 {
-            MOVE_ACCEL + held_ticks as f32 * 0.012 * SCALE
+            MOVE_ACCEL + held_ticks as f32 * 0.012 * SCALE * A_SCALE
         } else {
             MOVE_ACCEL
         };
@@ -1007,7 +1066,7 @@ impl Player {
             owner: self.id,
             weapon: self.weapon,
             vx: self.facing as f32 * speed * cos,
-            vy: speed * sin,
+            vy: speed * sin / Y_ASPECT,
             fuse: match self.weapon {
                 Weapon::Bazooka => 200,
                 Weapon::Grenade => 240,
@@ -1332,6 +1391,6 @@ mod tests {
 
         assert_eq!(game.players[&1].vx, before_velocity);
         assert_eq!(game.players[&1].charge_started, before_charge);
-        assert_eq!(game.players[&1].aim, -3);
+        assert_eq!(game.players[&1].aim, -2);
     }
 }

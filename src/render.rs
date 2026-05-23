@@ -176,12 +176,12 @@ pub fn frame(
         push_terminal_line(
             &mut out,
             &format!(
-                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+} FRAGS:{} DEATHS:{} ONLINE:{}",
+                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+}d FRAGS:{} D:{} P:{}",
                 me.name,
                 state,
                 weapon,
                 me.vx,
-                me.aim,
+                me.aim as i32 * 90 / 8,
                 me.kills,
                 me.deaths,
                 game.players.len()
@@ -567,7 +567,7 @@ mod tests {
 
         let update = incremental_frame(Some(&before), &after);
 
-        assert!(update.contains("ONLINE:2"));
+        assert!(update.contains("P:2"));
         assert!(update.contains("arrival"));
         assert!(
             !update.contains("\x1b[H"),
