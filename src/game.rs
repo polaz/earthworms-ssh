@@ -135,7 +135,6 @@ const JOIN_VERBS: &[&str] = &[
     "answered the call",
     "showed up with a rocket and a dream",
 ];
-const MAX_BLAST_DAMAGE: f32 = 800.0;
 const MIN_BLAST_DAMAGE: i16 = 40;
 
 pub type PlayerId = u64;
@@ -683,15 +682,15 @@ impl Game {
         }
         self.projectiles = remaining;
         for (x, y, owner, weapon) in explosions {
-            let radius = match weapon {
-                Weapon::Bazooka => 4 * WORLD_SCALE as i32,
-                Weapon::Grenade => 5 * WORLD_SCALE as i32,
+            let (radius, max_dmg) = match weapon {
+                Weapon::Bazooka => (4 * WORLD_SCALE as i32, 800.0),
+                Weapon::Grenade => (8 * WORLD_SCALE as i32, 1200.0),
             };
-            self.explode(x.round() as i32, y.round() as i32, radius, owner);
+            self.explode(x.round() as i32, y.round() as i32, radius, max_dmg, owner);
         }
     }
 
-    fn explode(&mut self, x: i32, y: i32, radius: i32, owner: PlayerId) {
+    fn explode(&mut self, x: i32, y: i32, radius: i32, max_dmg: f32, owner: PlayerId) {
         self.carve(x, y, radius);
         self.blasts.push(Blast {
             x,
@@ -710,9 +709,9 @@ impl Game {
             if distance > radius as f32 + 1.5 {
                 continue;
             }
-            let scale = MAX_BLAST_DAMAGE / (radius as f32 + 2.0);
+            let scale = max_dmg / (radius as f32 + 2.0);
             let damage = ((radius as f32 + 2.0 - distance) * scale)
-                .clamp(MIN_BLAST_DAMAGE as f32, MAX_BLAST_DAMAGE) as i16;
+                .clamp(MIN_BLAST_DAMAGE as f32, max_dmg) as i16;
             player.health -= damage;
             player.vx += dx.signum() * 0.8 * SCALE * V_SCALE;
             player.vy = -0.7 * SCALE * V_SCALE / Y_ASPECT;
@@ -1050,7 +1049,7 @@ impl Player {
         };
         let weapon_factor = match self.weapon {
             Weapon::Bazooka => 1.0,
-            Weapon::Grenade => 0.85,
+            Weapon::Grenade => 0.55,
         };
         let speed = MAX_PROJECTILE_SPEED * power_pct as f32 / 100.0 * weapon_factor;
         let angle = self.aim as f32 * std::f32::consts::PI / 16.0;
@@ -1127,7 +1126,7 @@ mod tests {
         target.y = 12.0;
         game.set_tile(30, 12, Tile::Earth);
 
-        game.explode(30, 12, 4, 1);
+        game.explode(30, 12, 4, 800.0, 1);
 
         assert_eq!(game.tile(30, 12), Tile::Air);
         assert!(game.players[&2].health < MAX_HEALTH);
@@ -1141,7 +1140,7 @@ mod tests {
         target.x = 20.0;
         target.y = 10.0;
         target.health = 1;
-        game.explode(20, 10, 5, 1);
+        game.explode(20, 10, 5, 800.0, 1);
         assert!(game.players[&1].respawn_ticks > 0);
 
         for _ in 0..=(TICK_RATE * 3) {
