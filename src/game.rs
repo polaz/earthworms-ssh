@@ -48,6 +48,26 @@ const FRAG_VERBS: &[&str] = &[
     "tactically removed",
     "redistributed across the map",
     "converted to particle effects",
+    "popped",
+    "decommissioned",
+    "kebab'd",
+    "memory-freed",
+    "404'd",
+    "garbage-collected",
+    "minced",
+    "vented to space",
+    "field-stripped",
+    "force-pushed off the map",
+    "discombobulated",
+    "explained gravity to",
+    "added to the changelog",
+    "rebooted with prejudice",
+    "applied percussive maintenance to",
+    "evicted",
+    "rage-quit on behalf of",
+    "deprecated",
+    "served a takedown notice to",
+    "negotiated with a missile against",
 ];
 
 const SUICIDE_VERBS: &[&str] = &[
@@ -59,6 +79,52 @@ const SUICIDE_VERBS: &[&str] = &[
     "ate their own rocket",
     "self-recycled",
     "demonstrated the blast radius",
+    "tested the weapon on themselves",
+    "yeeted themselves into the void",
+    "ran their own QA",
+    "achieved enlightenment, painfully",
+    "speedran the respawn timer",
+    "panicked and pressed Enter",
+    "DM'd themselves a rocket",
+    "discovered the muzzle was reversed",
+    "wrote their own obituary",
+    "unsubscribed from the server",
+    "took the express lane to respawn",
+    "applied the patch directly to face",
+    "auto-completed their own funeral",
+    "selected the wrong target lock",
+];
+
+const MUTUAL_VERBS: &[&str] = &[
+    "annihilated each other",
+    "exchanged farewells via ordnance",
+    "ran into each other's missiles",
+    "agreed to disagree, explosively",
+    "double-tapped each other",
+    "shook hands and detonated",
+    "demonstrated peer review",
+    "high-fived through a grenade",
+    "tied for worst tactical decision",
+    "deleted each other from existence",
+    "synchronized their respawn timers",
+    "achieved mutually assured deletion",
+];
+
+const JOIN_VERBS: &[&str] = &[
+    "tunneled into the arena",
+    "wormed in",
+    "joined the party uninvited",
+    "spawned with intent",
+    "is here to ruin somebody's day",
+    "materialized from the soil",
+    "logged in for chaos",
+    "wriggled onto the scene",
+    "appeared, looking suspicious",
+    "got out of bed for this",
+    "checked in for the apocalypse",
+    "rolled the spawn dice",
+    "answered the call",
+    "showed up with a rocket and a dream",
 ];
 const MAX_BLAST_DAMAGE: f32 = 800.0;
 const MIN_BLAST_DAMAGE: i16 = 40;
@@ -186,6 +252,7 @@ pub struct Game {
     clients: HashMap<PlayerId, Client>,
     next_growth_tick: u64,
     hang: Vec<u16>,
+    pending_kills: Vec<(PlayerId, PlayerId)>,
 }
 
 impl Game {
@@ -201,6 +268,7 @@ impl Game {
             clients: HashMap::new(),
             next_growth_tick: 40,
             hang: vec![0; WIDTH * HEIGHT],
+            pending_kills: Vec::new(),
         };
         game.generate_world();
         game
@@ -233,7 +301,8 @@ impl Game {
                         glyphs,
                     },
                 );
-                self.say(format!("{name} tunneled into the arena"));
+                let verb = JOIN_VERBS[self.rng.random_range(0..JOIN_VERBS.len())];
+                self.say(format!("{name} {verb}"));
             }
             Event::Leave(id) => {
                 self.clients.remove(&id);
@@ -262,6 +331,7 @@ impl Game {
         self.feed.retain(|(t, _)| *t >= cutoff);
         self.update_players();
         self.update_projectiles();
+        self.flush_kills();
         self.settle_terrain();
         if self.tick_number >= self.next_growth_tick {
             self.grow_terrain();
@@ -615,17 +685,59 @@ impl Game {
                 announcements.push((player.id, player.name.clone()));
             }
         }
-        for (victim, name) in announcements {
-            if victim != owner {
-                if let Some(killer) = self.players.get_mut(&owner) {
-                    killer.kills += 1;
-                    let killer_name = killer.name.clone();
-                    let verb = FRAG_VERBS[self.rng.random_range(0..FRAG_VERBS.len())];
-                    self.say(format!("{killer_name} {verb} {name}"));
+        for (victim, _) in announcements {
+            if victim != owner
+                && let Some(killer) = self.players.get_mut(&owner)
+            {
+                killer.kills += 1;
+            }
+            self.pending_kills.push((owner, victim));
+        }
+    }
+
+    fn flush_kills(&mut self) {
+        let kills = std::mem::take(&mut self.pending_kills);
+        let mut consumed = vec![false; kills.len()];
+        for i in 0..kills.len() {
+            if consumed[i] {
+                continue;
+            }
+            consumed[i] = true;
+            let (k1, v1) = kills[i];
+            let mut mutual = None;
+            if k1 != v1 {
+                for (j, &(k2, v2)) in kills.iter().enumerate().skip(i + 1) {
+                    if !consumed[j] && k2 == v1 && v2 == k1 {
+                        consumed[j] = true;
+                        mutual = Some(());
+                        break;
+                    }
                 }
-            } else {
+            }
+            let v1_name = self
+                .players
+                .get(&v1)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            if mutual.is_some() {
+                let k1_name = self
+                    .players
+                    .get(&k1)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                let verb = MUTUAL_VERBS[self.rng.random_range(0..MUTUAL_VERBS.len())];
+                self.say(format!("{k1_name} and {v1_name} {verb}"));
+            } else if k1 == v1 {
                 let verb = SUICIDE_VERBS[self.rng.random_range(0..SUICIDE_VERBS.len())];
-                self.say(format!("{name} {verb}"));
+                self.say(format!("{v1_name} {verb}"));
+            } else {
+                let k1_name = self
+                    .players
+                    .get(&k1)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                let verb = FRAG_VERBS[self.rng.random_range(0..FRAG_VERBS.len())];
+                self.say(format!("{k1_name} {verb} {v1_name}"));
             }
         }
     }

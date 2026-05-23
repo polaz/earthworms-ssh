@@ -568,7 +568,7 @@ mod tests {
         let update = incremental_frame(Some(&before), &after);
 
         assert!(update.contains("ONLINE:2"));
-        assert!(update.contains("arrival tunneled into the arena"));
+        assert!(update.contains("arrival"));
         assert!(
             !update.contains("\x1b[H"),
             "a remote player event should remain a row delta"
