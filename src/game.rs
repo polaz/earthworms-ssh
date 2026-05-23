@@ -33,7 +33,6 @@ const METEOR_INTERVAL_TICKS: u64 = TICK_RATE * 20;
 const METEOR_OWNER: PlayerId = u64::MAX;
 const MOVE_SUBSTEP: f32 = 0.9;
 const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
-const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
 const TALUS: i32 = 2;
 const SLIDE_BASE_PROBABILITY: f64 = 0.55;
 const GROWTH_HEIGHT_CAP_PCT: i32 = 70;
@@ -856,32 +855,70 @@ impl Game {
 
         let mut placed = 0;
         let mut attempts = 0;
-        while placed < burst && !candidates.is_empty() && attempts < burst * 12 {
+        while placed < burst && !candidates.is_empty() && attempts < burst * 4 {
             attempts += 1;
             let idx = self.rng.random_range(0..candidates.len());
-            let x = candidates[idx];
-            let Some((_, top)) = self.supported_growth_site(x) else {
+            let cx = candidates[idx];
+            let blob_remaining = (burst - placed).min(16);
+            if blob_remaining < 3 {
+                let added = self.place_cluster(cx, max_top_y, blob_remaining);
+                placed += added;
+                let _ = placed;
+                if added == 0 {
+                    candidates.swap_remove(idx);
+                }
+                break;
+            }
+            let target = self.rng.random_range(3..=blob_remaining);
+            let added = self.place_cluster(cx, max_top_y, target);
+            placed += added;
+            if added == 0 {
                 candidates.swap_remove(idx);
+            }
+            self.lift_buried_players();
+        }
+    }
+
+    fn place_cluster(&mut self, cx: i32, max_top_y: i32, budget: usize) -> usize {
+        if budget == 0 {
+            return 0;
+        }
+        let radius = match budget {
+            0..=3 => 1,
+            4..=8 => 2,
+            _ => 3,
+        };
+        let mut placed = 0;
+        for dx in -radius..=radius {
+            let nx = cx + dx;
+            if nx <= 0 || nx >= WIDTH as i32 - 1 {
+                continue;
+            }
+            let col_h = (radius - dx.abs() + 1).max(1);
+            let Some((_, top)) = self.supported_growth_site(nx) else {
                 continue;
             };
             if top < max_top_y {
-                candidates.swap_remove(idx);
                 continue;
             }
-            let max_push = (3.min(burst - placed)).max(1);
-            let push = self.rng.random_range(1..=max_push) as i32;
-            for k in 0..push {
+            for k in 0..col_h {
+                if placed >= budget {
+                    return placed;
+                }
                 let y = top - k;
                 if y < 0 {
                     break;
                 }
-                self.set_tile(x, y, Tile::Earth);
-                self.seed_cohesion(x, y);
-                self.hang[y as usize * WIDTH + x as usize] = 0;
+                if self.tile(nx, y) == Tile::Earth {
+                    continue;
+                }
+                self.set_tile(nx, y, Tile::Earth);
+                self.seed_cohesion(nx, y);
+                self.hang[y as usize * WIDTH + nx as usize] = 0;
                 placed += 1;
             }
-            self.lift_buried_players();
         }
+        placed
     }
 
     fn supported_growth_site(&self, x: i32) -> Option<(i32, i32)> {
@@ -923,14 +960,10 @@ impl Game {
                     continue;
                 }
                 let idx = y as usize * WIDTH + x as usize;
-                if anchored[idx] {
-                    self.hang[idx] = 0;
-                } else {
-                    self.hang[idx] = self.hang[idx].saturating_add(1);
-                    if self.hang[idx] >= HANG_FALL_DELAY {
-                        to_fall.push((x, y));
-                    }
+                if !anchored[idx] {
+                    to_fall.push((x, y));
                 }
+                self.hang[idx] = 0;
             }
         }
 
@@ -981,8 +1014,27 @@ impl Game {
             if left_diff < TALUS && right_diff < TALUS {
                 continue;
             }
-            let cohesion = self.cohesion[top as usize * WIDTH + x as usize].max(1) as f64;
-            let slide_p = (SLIDE_BASE_PROBABILITY / cohesion).clamp(0.05, 0.9);
+            let mut linked = self.cohesion[top as usize * WIDTH + x as usize].max(1);
+            for dx in [-2, -1, 1, 2] {
+                let nx = x + dx;
+                if nx < 0 || nx >= WIDTH as i32 {
+                    continue;
+                }
+                let mid = x + dx.signum();
+                if mid < 0 || mid >= WIDTH as i32 || self.surface_height(mid).is_none() {
+                    continue;
+                }
+                if let Some(ny) = self.surface_height(nx) {
+                    let n_idx = ny as usize * WIDTH + nx as usize;
+                    let n_coh = self.cohesion[n_idx];
+                    if dx.abs() == 1 {
+                        linked = linked.max(n_coh);
+                    } else if n_coh >= 2 {
+                        linked = linked.max(n_coh.saturating_sub(1).max(1));
+                    }
+                }
+            }
+            let slide_p = (SLIDE_BASE_PROBABILITY / linked as f64).clamp(0.05, 0.9);
             if !self.rng.random_bool(slide_p) {
                 continue;
             }
@@ -1332,7 +1384,7 @@ mod tests {
         game.set_tile(44, 9, Tile::Earth);
         game.next_growth_tick = u64::MAX;
 
-        for _ in 0..(HANG_FALL_DELAY as i32 + HEIGHT as i32 * 2) {
+        for _ in 0..(HEIGHT as i32 * 2) {
             game.tick();
         }
 
