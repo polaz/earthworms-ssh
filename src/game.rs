@@ -1040,6 +1040,41 @@ impl Game {
             }
         }
 
+        let mut cluster_id = vec![0u32; WIDTH * HEIGHT];
+        let mut cluster_size: Vec<u32> = vec![0];
+        let mut next_id: u32 = 1;
+        for sy in 0..HEIGHT as i32 {
+            for sx in 0..WIDTH as i32 {
+                let sidx = sy as usize * WIDTH + sx as usize;
+                if anchored[sidx] || self.tile(sx, sy) != Tile::Earth || cluster_id[sidx] != 0 {
+                    continue;
+                }
+                let mut size: u32 = 0;
+                let mut local: VecDeque<(i32, i32)> = VecDeque::new();
+                local.push_back((sx, sy));
+                cluster_id[sidx] = next_id;
+                while let Some((x, y)) = local.pop_front() {
+                    size += 1;
+                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                        if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                            continue;
+                        }
+                        let nidx = ny as usize * WIDTH + nx as usize;
+                        if anchored[nidx]
+                            || cluster_id[nidx] != 0
+                            || self.tile(nx, ny) != Tile::Earth
+                        {
+                            continue;
+                        }
+                        cluster_id[nidx] = next_id;
+                        local.push_back((nx, ny));
+                    }
+                }
+                cluster_size.push(size);
+                next_id += 1;
+            }
+        }
+
         let mut to_fall: Vec<(i32, i32)> = Vec::new();
         for y in 0..HEIGHT as i32 {
             for x in 0..WIDTH as i32 {
@@ -1047,10 +1082,25 @@ impl Game {
                     continue;
                 }
                 let idx = y as usize * WIDTH + x as usize;
-                if !anchored[idx] {
-                    to_fall.push((x, y));
+                if anchored[idx] {
+                    if self.hang[idx] >= 6 {
+                        self.cohesion[idx] = 1;
+                    }
+                    self.hang[idx] = 0;
+                    continue;
                 }
-                self.hang[idx] = 0;
+                let cid = cluster_id[idx] as usize;
+                if cid == 0 {
+                    continue;
+                }
+                let size = cluster_size[cid] as f64;
+                let coh = self.cohesion[idx].max(1) as f64;
+                let always_falls = cluster_size[cid] <= 4;
+                let p_fall = (size / (10.0 * coh * coh)).clamp(0.0, 1.0);
+                if !always_falls && !self.rng.random_bool(p_fall) {
+                    continue;
+                }
+                to_fall.push((x, y));
             }
         }
 
@@ -1065,12 +1115,14 @@ impl Game {
             if self.tile(x, y + 1) != Tile::Air {
                 continue;
             }
-            let prev_cohesion = self.cohesion[y as usize * WIDTH + x as usize].max(1);
+            let src_idx = y as usize * WIDTH + x as usize;
+            let prev_cohesion = self.cohesion[src_idx].max(1);
+            let prev_hang = self.hang[src_idx];
             self.set_tile(x, y, Tile::Air);
             self.set_tile(x, y + 1, Tile::Earth);
             let dst = (y + 1) as usize * WIDTH + x as usize;
             self.cohesion[dst] = prev_cohesion;
-            self.hang[dst] = 0;
+            self.hang[dst] = prev_hang.saturating_add(1);
         }
 
         self.slide_terrain();
