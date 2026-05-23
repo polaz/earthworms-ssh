@@ -160,6 +160,10 @@ async fn handle_socket(mut socket: WebSocket, name: String, q: WsQuery, state: A
                         if let Ok(msg) = serde_json::from_str::<ClientMsg>(&t) {
                             match msg {
                                 ClientMsg::Down { down } => {
+                                    let _ = state.events.send(Event::Input {
+                                        id,
+                                        input: down.as_bytes().to_vec(),
+                                    });
                                     held.lock().await.insert(down);
                                 }
                                 ClientMsg::Up { up } => {
