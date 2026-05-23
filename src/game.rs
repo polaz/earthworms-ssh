@@ -40,7 +40,7 @@ const GROWTH_MIN_BURST: usize = 3;
 const GROWTH_MAX_BURST: usize = 18;
 pub const MAX_HEALTH: i16 = 1000;
 const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
-const Y_ASPECT: f32 = 1.7;
+pub const Y_ASPECT: f32 = 1.7;
 const AIM_COOLDOWN_TICKS: u64 = TICK_RATE / 8;
 const FEED_TTL_TICKS: u64 = TICK_RATE * 8;
 

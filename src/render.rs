@@ -2,6 +2,7 @@ use std::fmt::Write;
 
 use crate::game::{
     ColorDepth, Game, GlyphMode, HEIGHT, MAX_HEALTH, PlayerId, Tile, WIDTH, WORLD_SCALE, Weapon,
+    Y_ASPECT,
 };
 
 const MAX_VIEWPORT_WIDTH: usize = 300;
@@ -69,18 +70,24 @@ pub fn frame(
                 GlyphMode::Powerlevel10k => '\u{f2db}',
             };
             if player.id == viewer {
-                let aim_mag = i32::from(player.aim).abs();
-                let horiz = (WORLD_SCALE as i32 * 4)
-                    .saturating_sub(aim_mag * WORLD_SCALE as i32 / 4)
-                    .max(WORLD_SCALE as i32);
-                plot_world(
+                let cw = canvas.first().map_or(0, Vec::len) as i32;
+                let ch_h = canvas.len() as i32;
+                let cwx = player.x.round() as i32 * cw / WIDTH as i32;
+                let cwy = player.y.round() as i32 * ch_h / HEIGHT as i32;
+                let angle = player.aim as f32 * std::f32::consts::PI / 16.0;
+                let radius_chars: f32 = 5.0;
+                let cdx = (radius_chars * angle.cos() * player.facing as f32).round() as i32;
+                let cdy = (radius_chars * angle.sin() / Y_ASPECT).round() as i32;
+                plot_canvas_styled(
                     &mut canvas,
-                    player.x.round() as i32 + player.facing as i32 * horiz,
-                    player.y.round() as i32 + i32::from(player.aim) * WORLD_SCALE as i32 * 3 / 4,
+                    &mut overlay,
+                    cwx + cdx,
+                    cwy + cdy,
                     match glyphs {
                         GlyphMode::Ascii => '+',
                         GlyphMode::Powerlevel10k => '\u{f140}',
                     },
+                    Style::Aim,
                 );
             }
             plot_world(
