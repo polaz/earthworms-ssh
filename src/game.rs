@@ -37,7 +37,6 @@ const TALUS: i32 = 2;
 const SLIDE_BASE_PROBABILITY: f64 = 0.55;
 const GROWTH_HEIGHT_CAP_PCT: i32 = 70;
 const GROWTH_MIN_BURST: usize = 6;
-const GROWTH_MAX_BURST: usize = 60;
 pub const MAX_HEALTH: i16 = 1000;
 const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
 pub const Y_ASPECT: f32 = 1.7;
@@ -360,16 +359,8 @@ impl Game {
         self.settle_terrain();
         if self.tick_number >= self.next_growth_tick {
             self.grow_terrain();
-            let earth = self.earth_count();
-            let fill = (earth as f32 / TERRAIN_CAP as f32).clamp(0.0, 1.0);
-            let abs_fill = earth as f32 / (WIDTH * HEIGHT) as f32;
-            let delay_sec = if abs_fill < 0.20 {
-                3.0
-            } else {
-                3.0 + fill * fill * 25.0
-            };
-            let delay = (delay_sec * TICK_RATE as f32) as u64;
-            self.next_growth_tick = self.tick_number + delay.max(TICK_RATE * 3);
+            let delay = TICK_RATE * 3;
+            self.next_growth_tick = self.tick_number + delay;
         }
         if self.tick_number >= self.next_meteor_tick {
             self.spawn_meteor();
@@ -840,13 +831,10 @@ impl Game {
             return;
         }
         let deficit = (TERRAIN_CAP - earth) as f32 / TERRAIN_CAP as f32;
-        let absolute_fill = earth as f32 / (WIDTH * HEIGHT) as f32;
-        let burst = if absolute_fill < 0.20 {
-            WIDTH * HEIGHT / 20
-        } else {
-            ((deficit * GROWTH_MAX_BURST as f32) as usize).clamp(GROWTH_MIN_BURST, GROWTH_MAX_BURST)
-        }
-        .min(TERRAIN_CAP - earth);
+        let target_per_event = (WIDTH * HEIGHT) as f32 / 40.0;
+        let burst = ((deficit * target_per_event) as usize)
+            .max(GROWTH_MIN_BURST)
+            .min(TERRAIN_CAP - earth);
 
         let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
         let mut candidates: Vec<i32> = Vec::new();
