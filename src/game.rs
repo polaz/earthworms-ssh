@@ -23,7 +23,8 @@ const FRICTION: f32 = 0.876;
 const SLIDE_ACCEL: f32 = 0.12 * SCALE * A_SCALE;
 const SLIDE_LOOKAHEAD: i32 = 2;
 const SLIDE_DROP_THRESHOLD: i32 = 4;
-const FIRE_RELEASE_SILENCE: u64 = TICK_RATE / 4;
+const FIRE_RELEASE_SILENCE_FAST: u64 = TICK_RATE / 4;
+const FIRE_RELEASE_SILENCE_SLOW: u64 = TICK_RATE * 6 / 10;
 pub const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
 pub const POWER_STEP_TICKS: u64 = TICK_RATE / 10;
 pub const POWER_STEP_PERCENT: u32 = 5;
@@ -222,6 +223,7 @@ pub struct Player {
     jump: bool,
     pub charge_started: Option<u64>,
     last_charge_pulse: Option<u64>,
+    charge_pulse_count: u8,
     last_move_tick: u64,
     movement_started: u64,
     last_direction: i8,
@@ -263,6 +265,7 @@ struct Client {
 #[derive(Clone, Copy)]
 struct GrowthTimer {
     cx: i32,
+    cy_origin: i32,
     radius: i32,
     cells_left: u16,
     cells_per_tick: u8,
@@ -534,9 +537,11 @@ impl Game {
                 b'\r' | b'\n' | b'x' | b'X' | b'f' | b'F' => {
                     if player.charge_started.is_none() && player.fire_cooldown == 0 {
                         player.charge_started = Some(tick);
+                        player.charge_pulse_count = 0;
                     }
                     if player.charge_started.is_some() {
                         player.last_charge_pulse = Some(tick);
+                        player.charge_pulse_count = player.charge_pulse_count.saturating_add(1);
                     }
                 }
                 _ => {}
@@ -592,10 +597,15 @@ impl Game {
                     player.vy = (-(0.7 * SCALE) - player.vx.abs() * 0.3) * V_SCALE / Y_ASPECT;
                 }
                 player.vy = (player.vy + GRAVITY).min(MAX_FALL);
+                let silence_threshold = if player.charge_pulse_count >= 2 {
+                    FIRE_RELEASE_SILENCE_FAST
+                } else {
+                    FIRE_RELEASE_SILENCE_SLOW
+                };
                 if let Some(start) = player.charge_started
                     && (self.tick_number.saturating_sub(start) >= MAX_CHARGE_TICKS
                         || player.last_charge_pulse.is_some_and(|pulse| {
-                            self.tick_number.saturating_sub(pulse) >= FIRE_RELEASE_SILENCE
+                            self.tick_number.saturating_sub(pulse) >= silence_threshold
                         }))
                     && player.fire_cooldown == 0
                 {
@@ -605,6 +615,7 @@ impl Game {
                     projectile = Some(player.fire(power_pct));
                     player.charge_started = None;
                     player.last_charge_pulse = None;
+                    player.charge_pulse_count = 0;
                 }
                 player.move_impulse = 0.0;
                 player.jump = false;
@@ -863,12 +874,13 @@ impl Game {
             if self.growth_timers[i].cells_left > 0 {
                 let cx = self.growth_timers[i].cx;
                 let radius = self.growth_timers[i].radius;
+                let cy_origin = self.growth_timers[i].cy_origin;
                 let per_tick = self.growth_timers[i].cells_per_tick.max(1);
                 for _ in 0..per_tick {
                     if self.growth_timers[i].cells_left == 0 {
                         break;
                     }
-                    if self.drip_one_cell(cx, radius) {
+                    if self.drip_one_cell(cx, radius, cy_origin) {
                         self.growth_timers[i].cells_left -= 1;
                     } else {
                         self.growth_timers[i].cells_left = 0;
@@ -901,23 +913,31 @@ impl Game {
         } else {
             candidates[self.rng.random_range(0..candidates.len())]
         };
+        let cy_origin = self
+            .supported_growth_site(cx)
+            .map(|(_, y)| y)
+            .unwrap_or(HEIGHT as i32 - 1);
+        let radius = (((cluster_size as f32).sqrt() * Y_ASPECT.sqrt()) as i32).clamp(3, 16);
         let cells_per_tick = cluster_size.div_ceil(pour_ticks.max(1)).clamp(1, 255) as u8;
         GrowthTimer {
             cx,
-            radius: 5,
+            cy_origin,
+            radius,
             cells_left: cluster_size,
             cells_per_tick,
             cooldown_left: 0,
         }
     }
 
-    fn drip_one_cell(&mut self, cx: i32, radius: i32) -> bool {
+    fn drip_one_cell(&mut self, cx: i32, radius: i32, cy_origin: i32) -> bool {
         if self.earth_count() >= TERRAIN_CAP {
             return false;
         }
         let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
-        for _ in 0..8 {
-            let dx = self.rng.random_range(-radius..=radius);
+        for _ in 0..16 {
+            let dx1 = self.rng.random_range(-radius..=radius);
+            let dx2 = self.rng.random_range(-radius..=radius);
+            let dx = (dx1 + dx2) / 2;
             let nx = cx + dx;
             if nx < 1 || nx >= WIDTH as i32 - 1 {
                 continue;
@@ -926,6 +946,11 @@ impl Game {
                 continue;
             };
             if top < max_top_y {
+                continue;
+            }
+            let dome_h = (((radius * radius - dx * dx).max(0) as f32).sqrt() / Y_ASPECT) as i32;
+            let rise = cy_origin - top;
+            if rise >= dome_h {
                 continue;
             }
             self.set_tile(nx, top, Tile::Earth);
@@ -940,7 +965,7 @@ impl Game {
     fn grow_terrain(&mut self) {
         let drip = self.new_drip(60, 1);
         for _ in 0..60 {
-            self.drip_one_cell(drip.cx, drip.radius);
+            self.drip_one_cell(drip.cx, drip.radius, drip.cy_origin);
         }
         self.lift_buried_players();
     }
@@ -1158,6 +1183,7 @@ impl Player {
             jump: false,
             charge_started: None,
             last_charge_pulse: None,
+            charge_pulse_count: 0,
             last_move_tick: 0,
             movement_started: 0,
             last_direction: 0,
@@ -1177,6 +1203,7 @@ impl Player {
         self.regen_carry = 0;
         self.charge_started = None;
         self.last_charge_pulse = None;
+        self.charge_pulse_count = 0;
         self.fire_cooldown = 0;
         self.move_impulse = 0.0;
         self.jump = false;
@@ -1478,7 +1505,7 @@ mod tests {
         quick.tiles.fill(Tile::Air);
         quick.players.get_mut(&1).expect("worm exists").y = 3.0;
         quick.handle_input(1, b"\r");
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             quick.tick();
         }
         let quick_speed = quick.projectiles[0].vx.abs();
@@ -1488,11 +1515,11 @@ mod tests {
         charged.tiles.fill(Tile::Air);
         charged.players.get_mut(&1).expect("worm exists").y = 3.0;
         charged.handle_input(1, b"\r");
-        for _ in 0..12 {
+        for _ in 0..40 {
             charged.tick();
             charged.handle_input(1, b"\r");
         }
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             charged.tick();
         }
         let charged_speed = charged.projectiles[0].vx.abs();
@@ -1509,7 +1536,7 @@ mod tests {
         single.handle_input(1, b"\r");
         single.tick();
         single.handle_input(1, b"\r");
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             single.tick();
         }
 
@@ -1520,7 +1547,7 @@ mod tests {
         spammed.handle_input(1, b"\r\r\r\r\r");
         spammed.tick();
         spammed.handle_input(1, b"\r\r\r\r\r");
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             spammed.tick();
         }
 
