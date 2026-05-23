@@ -12,6 +12,7 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::header,
     response::{Html, IntoResponse},
     routing::get,
 };
@@ -48,8 +49,12 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let state = AppState { events, next_id };
     let app = Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
+        .route(
+            "/",
+            get(|| async { ([(header::CACHE_CONTROL, "no-store")], Html(INDEX_HTML)) }),
+        )
         .route("/ws/:name", get(ws_handler))
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state);
     info!(address = %addr, "web client serving on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -71,6 +76,13 @@ async fn handle_socket(mut socket: WebSocket, name: String, q: WsQuery, state: A
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let cols = q.cols.unwrap_or(100).clamp(20, 400);
     let rows = q.rows.unwrap_or(30).clamp(8, 120);
+    if socket
+        .send(Message::Text("\x1b[?25l\x1b[2J\x1b[H".to_string()))
+        .await
+        .is_err()
+    {
+        return;
+    }
     if state
         .events
         .send(Event::Join {
