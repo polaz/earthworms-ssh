@@ -18,9 +18,13 @@ pub fn frame(
 ) -> String {
     let terminal_width = (columns as usize).saturating_sub(1).max(6);
     let feed_lines = usize::from(rows >= 10) * 2;
-    let viewport_width = terminal_width
-        .saturating_sub(2)
-        .clamp(4, MAX_VIEWPORT_WIDTH);
+    let cell_factor: usize = if matches!(glyphs, GlyphMode::Emoji) {
+        2
+    } else {
+        1
+    };
+    let viewport_width =
+        (terminal_width.saturating_sub(2) / cell_factor).clamp(4, MAX_VIEWPORT_WIDTH);
     let viewport_height = (rows as usize)
         .saturating_sub(4 + feed_lines)
         .clamp(2, MAX_VIEWPORT_HEIGHT);
@@ -41,6 +45,12 @@ pub fn frame(
             match glyphs {
                 GlyphMode::Ascii => projectile.glyph,
                 GlyphMode::Powerlevel10k => '\u{f135}',
+                GlyphMode::Emoji => match projectile.glyph {
+                    '*' => '🚀',
+                    'o' => '💣',
+                    '@' => '☄',
+                    other => other,
+                },
             },
         );
     }
@@ -49,6 +59,7 @@ pub fn frame(
             GlyphMode::Ascii if blast.age % 2 == 0 => '@',
             GlyphMode::Ascii => '*',
             GlyphMode::Powerlevel10k => '\u{f0e7}',
+            GlyphMode::Emoji => '💥',
         };
         plot_world(&mut canvas, blast.x, blast.y, pulse);
         plot_world(&mut canvas, blast.x - 1, blast.y, pulse);
@@ -62,12 +73,16 @@ pub fn frame(
                 (GlyphMode::Ascii, false) => '<',
                 (GlyphMode::Powerlevel10k, true) => '\u{e0b0}',
                 (GlyphMode::Powerlevel10k, false) => '\u{e0b2}',
+                (GlyphMode::Emoji, true) => '👉',
+                (GlyphMode::Emoji, false) => '👈',
             };
             let worm = match glyphs {
                 GlyphMode::Ascii if player.id == viewer => '@',
                 GlyphMode::Ascii => 'w',
                 GlyphMode::Powerlevel10k if player.id == viewer => '\u{f188}',
                 GlyphMode::Powerlevel10k => '\u{f2db}',
+                GlyphMode::Emoji if player.id == viewer => '🐛',
+                GlyphMode::Emoji => '🪱',
             };
             if player.id == viewer {
                 let cw = canvas.first().map_or(0, Vec::len) as i32;
@@ -86,6 +101,7 @@ pub fn frame(
                     match glyphs {
                         GlyphMode::Ascii => '+',
                         GlyphMode::Powerlevel10k => '\u{f140}',
+                        GlyphMode::Emoji => '🎯',
                     },
                     Style::Aim,
                 );
@@ -205,7 +221,7 @@ pub fn frame(
         );
     }
     out.push('+');
-    out.push_str(&"-".repeat(viewport_width));
+    out.push_str(&"-".repeat(viewport_width * cell_factor));
     out.push_str("+\x1b[K\r\n");
     for (row, overlay_row) in canvas.iter().zip(overlay.iter()) {
         out.push('|');
@@ -217,11 +233,14 @@ pub fn frame(
                 active_style = style;
             }
             out.push(*ch);
+            if cell_factor == 2 && !is_double_wide(*ch) {
+                out.push(' ');
+            }
         }
         out.push_str("\x1b[0m|\x1b[K\r\n");
     }
     out.push('+');
-    out.push_str(&"-".repeat(viewport_width));
+    out.push_str(&"-".repeat(viewport_width * cell_factor));
     out.push_str("+\x1b[K\r\n");
     push_terminal_line(
         &mut out,
@@ -401,6 +420,18 @@ fn style_for(ch: char, glyphs: GlyphMode) -> Style {
         (_, '◆') => Style::Health,
         _ => Style::Plain,
     }
+}
+
+fn is_double_wide(c: char) -> bool {
+    let code = c as u32;
+    matches!(
+        code,
+        0x1F300..=0x1F6FF
+            | 0x1F900..=0x1F9FF
+            | 0x1FA00..=0x1FAFF
+            | 0x1F100..=0x1F1FF
+            | 0x2600..=0x27BF
+    )
 }
 
 fn plot_world(canvas: &mut [Vec<char>], x: i32, y: i32, ch: char) {

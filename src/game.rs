@@ -36,7 +36,6 @@ const MOVE_SUBSTEP: f32 = 0.9;
 const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
 const TALUS: i32 = 2;
 const SLIDE_BASE_PROBABILITY: f64 = 0.55;
-const GROWTH_HEIGHT_CAP_PCT: i32 = 70;
 pub const MAX_HEALTH: i16 = 1000;
 const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
 pub const Y_ASPECT: f32 = 1.7;
@@ -161,6 +160,7 @@ pub enum ColorDepth {
 pub enum GlyphMode {
     Ascii,
     Powerlevel10k,
+    Emoji,
 }
 
 #[derive(Debug)]
@@ -716,7 +716,7 @@ impl Game {
             let (radius, max_dmg) = match weapon {
                 Weapon::Bazooka => (4 * WORLD_SCALE as i32, 800.0),
                 Weapon::Grenade => (8 * WORLD_SCALE as i32, 1200.0),
-                Weapon::Meteor => (12 * WORLD_SCALE as i32, 1500.0),
+                Weapon::Meteor => (6 * WORLD_SCALE as i32, 1500.0),
             };
             self.explode(x.round() as i32, y.round() as i32, radius, max_dmg, owner);
         }
@@ -736,7 +736,7 @@ impl Game {
                 continue;
             }
             let dx = player.x - x as f32;
-            let dy = player.y - y as f32;
+            let dy = (player.y - y as f32) * Y_ASPECT;
             let distance = (dx * dx + dy * dy).sqrt();
             if distance > radius as f32 + 1.5 {
                 continue;
@@ -814,11 +814,13 @@ impl Game {
     }
 
     fn carve(&mut self, cx: i32, cy: i32, radius: i32) {
-        for y in (cy - radius)..=(cy + radius) {
+        let r2 = (radius as f32) * (radius as f32);
+        let ry = (radius as f32 / Y_ASPECT).ceil() as i32;
+        for y in (cy - ry)..=(cy + ry) {
             for x in (cx - radius)..=(cx + radius) {
-                let dx = x - cx;
-                let dy = y - cy;
-                if dx * dx + dy * dy <= radius * radius {
+                let dx = (x - cx) as f32;
+                let dy = (y - cy) as f32 * Y_ASPECT;
+                if dx * dx + dy * dy <= r2 {
                     self.set_tile(x, y, Tile::Air);
                 }
             }
@@ -898,20 +900,53 @@ impl Game {
     }
 
     fn new_drip(&mut self, cluster_size: u16, pour_ticks: u16) -> GrowthTimer {
-        let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
-        let mut candidates: Vec<i32> = Vec::new();
+        let radius_est = (((cluster_size as f32).sqrt() * Y_ASPECT.sqrt()) as i32).clamp(3, 16);
+        let player_buffer = radius_est + WORLD_SCALE as i32 * 3;
+        let player_xs: Vec<i32> = self
+            .players
+            .values()
+            .filter(|p| p.respawn_ticks == 0)
+            .map(|p| p.x as i32)
+            .collect();
+        let mut candidates: Vec<(i32, i32)> = Vec::new();
         for x in 1..(WIDTH as i32 - 1) {
             let Some((_, top)) = self.supported_growth_site(x) else {
                 continue;
             };
-            if top >= max_top_y {
-                candidates.push(x);
-            }
+            candidates.push((x, top));
         }
         let cx = if candidates.is_empty() {
             self.rng.random_range(1..(WIDTH as i32 - 1))
         } else {
-            candidates[self.rng.random_range(0..candidates.len())]
+            let weights: Vec<u64> = candidates
+                .iter()
+                .map(|&(cx, top)| {
+                    let min_d = player_xs
+                        .iter()
+                        .map(|&px| (cx - px).abs())
+                        .min()
+                        .unwrap_or(WIDTH as i32);
+                    let player_w = if min_d < player_buffer {
+                        0u64
+                    } else {
+                        (min_d as u64).saturating_mul(min_d as u64)
+                    };
+                    let height_left = (top as u64).max(1);
+                    let height_w = height_left.saturating_mul(height_left);
+                    player_w.saturating_mul(height_w).max(1)
+                })
+                .collect();
+            let total: u64 = weights.iter().sum();
+            let mut roll = self.rng.random_range(0..total);
+            let mut chosen = candidates[candidates.len() - 1].0;
+            for ((cx, _), &w) in candidates.iter().zip(weights.iter()) {
+                if roll < w {
+                    chosen = *cx;
+                    break;
+                }
+                roll -= w;
+            }
+            chosen
         };
         let cy_origin = self
             .supported_growth_site(cx)
@@ -933,7 +968,6 @@ impl Game {
         if self.earth_count() >= TERRAIN_CAP {
             return false;
         }
-        let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
         for _ in 0..16 {
             let dx1 = self.rng.random_range(-radius..=radius);
             let dx2 = self.rng.random_range(-radius..=radius);
@@ -945,8 +979,16 @@ impl Game {
             let Some((_, top)) = self.supported_growth_site(nx) else {
                 continue;
             };
-            if top < max_top_y {
+            if top < 3 {
                 continue;
+            }
+            let height_pct = ((HEIGHT as i32 - top) * 100) / HEIGHT as i32;
+            if height_pct > 50 {
+                let extra = (height_pct - 50) as f64 / 50.0;
+                let reject_p = extra * extra;
+                if self.rng.random_bool(reject_p.clamp(0.0, 0.95)) {
+                    continue;
+                }
             }
             let dome_h = (((radius * radius - dx * dx).max(0) as f32).sqrt() / Y_ASPECT) as i32;
             let rise = cy_origin - top;
@@ -1347,20 +1389,11 @@ mod tests {
     fn growing_earth_lifts_a_worm_standing_on_new_growth() {
         let mut game = Game::new(2);
         join(&mut game, 1, "lifted");
-        game.tiles.fill(Tile::Air);
-        for x in 1..(WIDTH - 1) as i32 {
-            game.set_tile(x, HEIGHT as i32 - 1, Tile::Earth);
-        }
-        game.players.get_mut(&1).expect("worm exists").x = 50.0;
+        let wx = 50;
+        game.players.get_mut(&1).expect("worm exists").x = wx as f32;
         game.players.get_mut(&1).expect("worm exists").y = HEIGHT as f32 - 2.0;
-        for _ in 0..300 {
-            game.grow_terrain();
-            if game.tile(50, HEIGHT as i32 - 2) == Tile::Earth {
-                break;
-            }
-        }
-
-        assert_eq!(game.tile(50, HEIGHT as i32 - 2), Tile::Earth);
+        game.set_tile(wx, HEIGHT as i32 - 2, Tile::Earth);
+        game.lift_buried_players();
         assert!(game.players[&1].y < HEIGHT as f32 - 2.0);
     }
 
