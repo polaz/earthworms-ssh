@@ -362,7 +362,12 @@ impl Game {
             self.grow_terrain();
             let earth = self.earth_count();
             let fill = (earth as f32 / TERRAIN_CAP as f32).clamp(0.0, 1.0);
-            let delay_sec = 3.0 + fill * fill * 25.0;
+            let abs_fill = earth as f32 / (WIDTH * HEIGHT) as f32;
+            let delay_sec = if abs_fill < 0.20 {
+                3.0
+            } else {
+                3.0 + fill * fill * 25.0
+            };
             let delay = (delay_sec * TICK_RATE as f32) as u64;
             self.next_growth_tick = self.tick_number + delay.max(TICK_RATE * 3);
         }
@@ -835,9 +840,13 @@ impl Game {
             return;
         }
         let deficit = (TERRAIN_CAP - earth) as f32 / TERRAIN_CAP as f32;
-        let burst = ((deficit * GROWTH_MAX_BURST as f32) as usize)
-            .clamp(GROWTH_MIN_BURST, GROWTH_MAX_BURST)
-            .min(TERRAIN_CAP - earth);
+        let absolute_fill = earth as f32 / (WIDTH * HEIGHT) as f32;
+        let burst = if absolute_fill < 0.20 {
+            WIDTH * HEIGHT / 20
+        } else {
+            ((deficit * GROWTH_MAX_BURST as f32) as usize).clamp(GROWTH_MIN_BURST, GROWTH_MAX_BURST)
+        }
+        .min(TERRAIN_CAP - earth);
 
         let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
         let mut candidates: Vec<i32> = Vec::new();
