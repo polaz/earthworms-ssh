@@ -130,8 +130,8 @@ pub fn frame(
                 hp_style,
             );
             if let Some(start) = player.charge_started {
-                let elapsed = game.tick_number.saturating_sub(start).min(60);
-                let percent = ((elapsed / 3) * 5).min(100) as i32;
+                let elapsed = game.tick_number.saturating_sub(start).min(40);
+                let percent = ((elapsed / 2) * 5).min(100) as i32;
                 let pw_value = (percent * 16 / 100).clamp(0, 16);
                 let (bottom, top) = level_split(pw_value);
                 plot_canvas_styled(
@@ -164,8 +164,8 @@ pub fn frame(
         let state = if me.respawn_ticks > 0 {
             format!("RESPAWN {:.1}s", me.respawn_ticks as f32 / 20.0)
         } else if let Some(start) = me.charge_started {
-            let elapsed = game.tick_number.saturating_sub(start).min(60);
-            let percent = ((elapsed / 3) * 5).min(100) as u8;
+            let elapsed = game.tick_number.saturating_sub(start).min(40);
+            let percent = ((elapsed / 2) * 5).min(100) as u8;
             format!("CHARGE {percent:>3}%")
         } else {
             format!(

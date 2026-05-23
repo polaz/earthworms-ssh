@@ -27,10 +27,11 @@ pub struct WormServer {
 
 impl WormServer {
     pub fn new(events: UnboundedSender<Event>) -> Self {
-        Self {
-            events,
-            next_id: Arc::new(AtomicU64::new(1)),
-        }
+        Self::with_id_source(events, Arc::new(AtomicU64::new(1)))
+    }
+
+    pub fn with_id_source(events: UnboundedSender<Event>, next_id: Arc<AtomicU64>) -> Self {
+        Self { events, next_id }
     }
 }
 

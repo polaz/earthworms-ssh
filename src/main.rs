@@ -1,4 +1,10 @@
-use std::{borrow::Cow, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -12,6 +18,7 @@ use tracing::info;
 use worms_ssh::{
     game::{Event, Game, TICK_RATE},
     ssh::WormServer,
+    web,
 };
 
 #[derive(Debug, Parser)]
@@ -31,6 +38,10 @@ struct Args {
     /// Deterministic world seed, useful for tournaments and testing.
     #[arg(long, env = "WORMS_SEED")]
     seed: Option<u64>,
+
+    /// HTTP address for the web client (empty string disables).
+    #[arg(long, env = "WORMS_WEB", default_value = "0.0.0.0:8080")]
+    web: String,
 }
 
 #[tokio::main]
@@ -68,9 +79,25 @@ async fn main() -> Result<()> {
         }
     });
 
+    let next_id = Arc::new(AtomicU64::new(1));
+
+    if !args.web.is_empty() {
+        let web_addr: SocketAddr = args
+            .web
+            .parse()
+            .with_context(|| format!("invalid --web address: {}", args.web))?;
+        let web_events = event_tx.clone();
+        let web_ids = next_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = web::run(web_events, web_ids, web_addr).await {
+                tracing::error!(%error, "web listener terminated");
+            }
+        });
+    }
+
     info!(address = %args.listen, "ASCII arena accepting SSH players");
     info!("connect with: ssh -p {} <name>@<host>", args.listen.port());
-    let mut server = WormServer::new(event_tx);
+    let mut server = WormServer::with_id_source(event_tx, next_id);
     server
         .run_on_address(config, args.listen)
         .await

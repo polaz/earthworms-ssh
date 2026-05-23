@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>worms//ssh web</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<style>
+  html, body { margin: 0; padding: 0; background: #000; color: #ccc; font-family: ui-monospace, Menlo, monospace; height: 100%; }
+  #wrap { display: flex; flex-direction: column; height: 100vh; }
+  #bar { padding: 6px 10px; font-size: 12px; background: #111; border-bottom: 1px solid #222; }
+  #term { flex: 1; padding: 4px; }
+  .xterm .xterm-cursor-layer { display: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">worms//ssh web · A/D move · W/S aim · Space jump · Enter hold = charge · 1/2 weapon · <span id="status">connecting…</span></div>
+  <div id="term"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const name = params.get("name") || prompt("Pick a worm name", "anon") || "anon";
+
+  const term = new Terminal({
+    cursorBlink: false,
+    cursorStyle: "bar",
+    cursorInactiveStyle: "none",
+    disableStdin: true,
+    convertEol: false,
+    fontFamily: "ui-monospace, Menlo, monospace",
+    fontSize: 14,
+    theme: { background: "#000", foreground: "#ccc", cursor: "rgba(0,0,0,0)", cursorAccent: "rgba(0,0,0,0)" },
+    allowProposedApi: true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  fit.fit();
+
+  const status = document.getElementById("status");
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${proto}://${location.host}/ws/${encodeURIComponent(name)}?cols=${term.cols}&rows=${term.rows}`;
+  const ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => { status.textContent = `connected as ${name}`; };
+  ws.onclose = () => { status.textContent = "disconnected"; stopTick(); };
+  ws.onerror = () => { status.textContent = "error"; };
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string") term.write(e.data);
+    else term.write(new Uint8Array(e.data));
+  };
+
+  const send = (data) => { if (ws.readyState === 1) ws.send(data); };
+
+  // Keys whose effect should pulse every tick while held. Server uses
+  // accumulated tick count, not OS key-repeat, so do not wait for the OS to
+  // start repeating after its 500ms delay.
+  const repeat = new Map([
+    ["a", "a"], ["A", "a"], ["d", "d"], ["D", "d"],
+    ["w", "w"], ["W", "w"], ["s", "s"], ["S", "s"],
+    ["j", "j"], ["J", "j"], ["l", "l"], ["L", "l"],
+    ["ArrowLeft", "\x1b[D"], ["ArrowRight", "\x1b[C"],
+    ["ArrowUp", "\x1b[A"], ["ArrowDown", "\x1b[B"],
+    ["Enter", "\r"],
+  ]);
+  // One-shot keys: a single byte per press, no repeat regardless of how long
+  // the user holds them.
+  const oneShot = new Map([
+    [" ", " "], ["1", "1"], ["2", "2"],
+  ]);
+
+  const pressed = new Map();
+  const stopAll = () => {
+    for (const bytes of pressed.values()) sendJson({ up: bytes });
+    pressed.clear();
+  };
+  const sendJson = (obj) => send(JSON.stringify(obj));
+
+  window.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
+      e.preventDefault();
+      sendJson({ press: "\x03" });
+      ws.close();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (repeat.has(e.key)) {
+      e.preventDefault();
+      if (!pressed.has(e.key)) {
+        const bytes = repeat.get(e.key);
+        pressed.set(e.key, bytes);
+        sendJson({ down: bytes });
+      }
+    } else if (oneShot.has(e.key)) {
+      e.preventDefault();
+      sendJson({ press: oneShot.get(e.key) });
+    }
+  }, true);
+
+  window.addEventListener("keyup", (e) => {
+    const bytes = pressed.get(e.key);
+    if (bytes !== undefined) {
+      pressed.delete(e.key);
+      sendJson({ up: bytes });
+    }
+  }, true);
+
+  window.addEventListener("blur", stopAll);
+
+  let pending = null;
+  const flushResize = () => {
+    pending = null;
+    fit.fit();
+    send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+  };
+  window.addEventListener("resize", () => {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(flushResize, 80);
+  });
+})();
+</script>
+</body>
+</html>
