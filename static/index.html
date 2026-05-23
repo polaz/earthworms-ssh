@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>worms//ssh web</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.css">
+<style>
+  html, body { margin: 0; padding: 0; background: #000; color: #ccc; font-family: ui-monospace, Menlo, monospace; height: 100%; }
+  #wrap { display: flex; flex-direction: column; height: 100vh; }
+  #bar { padding: 6px 10px; font-size: 12px; background: #111; border-bottom: 1px solid #222; }
+  #term { flex: 1; padding: 4px; }
+  a { color: #6cf; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">worms//ssh web · A/D move · W/S aim · Space jump · Enter hold = charge · 1/2 weapon · <span id="status">connecting…</span></div>
+  <div id="term"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const name = params.get("name") || prompt("Pick a worm name", "anon") || "anon";
+
+  const term = new Terminal({
+    cursorBlink: false,
+    disableStdin: false,
+    convertEol: false,
+    fontFamily: "ui-monospace, Menlo, monospace",
+    fontSize: 14,
+    theme: { background: "#000", foreground: "#ccc" },
+    allowProposedApi: true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  fit.fit();
+
+  const status = document.getElementById("status");
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${proto}://${location.host}/ws/${encodeURIComponent(name)}?cols=${term.cols}&rows=${term.rows}`;
+  const ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => { status.textContent = `connected as ${name}`; };
+  ws.onclose = () => { status.textContent = "disconnected"; };
+  ws.onerror = () => { status.textContent = "error"; };
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string") term.write(e.data);
+    else term.write(new Uint8Array(e.data));
+  };
+
+  term.onData((d) => { if (ws.readyState === 1) ws.send(d); });
+
+  let pending = null;
+  const flushResize = () => {
+    pending = null;
+    fit.fit();
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+    }
+  };
+  window.addEventListener("resize", () => {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(flushResize, 80);
+  });
+
+  document.getElementById("term").addEventListener("click", () => term.focus());
+  term.focus();
+})();
+</script>
+</body>
+</html>
