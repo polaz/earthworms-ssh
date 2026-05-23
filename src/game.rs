@@ -925,10 +925,11 @@ impl Game {
                         .map(|&px| (cx - px).abs())
                         .min()
                         .unwrap_or(WIDTH as i32);
+                    let d = min_d as u64;
                     let player_w = if min_d < player_buffer {
-                        0u64
+                        d.saturating_mul(d) / 64 + 1
                     } else {
-                        (min_d as u64).saturating_mul(min_d as u64)
+                        d.saturating_mul(d)
                     };
                     let height_left = (top as u64).max(1);
                     let height_w = height_left.saturating_mul(height_left);
@@ -1072,70 +1073,55 @@ impl Game {
             }
         }
 
-        let n_anc_clusters = a_next as usize;
-        if n_anc_clusters > 1 {
-            let mut row_w = vec![0u32; n_anc_clusters * HEIGHT];
-            let mut row_x_sum = vec![0u64; n_anc_clusters * HEIGHT];
-            let mut row_x_min = vec![u32::MAX; n_anc_clusters * HEIGHT];
-            let mut row_x_max = vec![0u32; n_anc_clusters * HEIGHT];
+        if a_next > 1 {
+            let mut local_support = vec![0u16; WIDTH * HEIGHT];
             for y in 0..HEIGHT {
-                for x in 0..WIDTH {
-                    let idx = y * WIDTH + x;
-                    let cid = a_cluster_id[idx] as usize;
-                    if cid > 0 {
-                        let k = cid * HEIGHT + y;
-                        row_w[k] += 1;
-                        row_x_sum[k] += x as u64;
-                        if (x as u32) < row_x_min[k] {
-                            row_x_min[k] = x as u32;
-                        }
-                        if (x as u32) > row_x_max[k] {
-                            row_x_max[k] = x as u32;
-                        }
-                    }
-                }
-            }
-            const VERT_RATIO: u32 = 25;
-            const TORQUE_FACTOR_NUM: u64 = 14;
-            const TORQUE_FACTOR_DEN: u64 = 10;
-            let mut break_y: Vec<Option<usize>> = vec![None; n_anc_clusters];
-            for (cid, slot) in break_y.iter_mut().enumerate().skip(1) {
-                let mut mass_above: u64 = 0;
-                let mut x_sum_above: u64 = 0;
-                for y in 0..HEIGHT {
-                    let k = cid * HEIGHT + y;
-                    let w = row_w[k] as u64;
-                    if w == 0 {
+                let mut x = 0;
+                while x < WIDTH {
+                    let cid_here = a_cluster_id[y * WIDTH + x];
+                    if cid_here == 0 {
+                        x += 1;
                         continue;
                     }
-                    if let (Some(support_centroid_10), Some(load_centroid_10)) = (
-                        (row_x_sum[k] * 10).checked_div(w),
-                        (x_sum_above * 10).checked_div(mass_above),
-                    ) {
-                        let offset_10 = support_centroid_10.abs_diff(load_centroid_10);
-                        let support_span = (row_x_max[k] - row_x_min[k] + 1) as u64;
-                        let torque_limit_10 =
-                            support_span * 10 * TORQUE_FACTOR_NUM / (2 * TORQUE_FACTOR_DEN);
-                        let vertical_fail = w * (VERT_RATIO as u64) < mass_above;
-                        let torque_fail = offset_10 > torque_limit_10;
-                        if vertical_fail || torque_fail {
-                            *slot = Some(y);
-                            break;
-                        }
+                    let start = x;
+                    while x < WIDTH && a_cluster_id[y * WIDTH + x] == cid_here {
+                        x += 1;
                     }
-                    mass_above += w;
-                    x_sum_above += row_x_sum[k];
+                    let len = (x - start) as u16;
+                    for cx in start..x {
+                        local_support[y * WIDTH + cx] = len;
+                    }
                 }
             }
-            for y in 0..HEIGHT {
-                for x in 0..WIDTH {
+            const STRENGTH: u64 = 100;
+            for x in 0..WIDTH {
+                let mut col_mass: u64 = 0;
+                let mut broken_at: Option<usize> = None;
+                let mut cluster_seen: u32 = 0;
+                for y in 0..HEIGHT {
                     let idx = y * WIDTH + x;
-                    let cid = a_cluster_id[idx] as usize;
-                    if cid > 0
-                        && let Some(yb) = break_y[cid]
-                        && y < yb
-                    {
-                        anchored[idx] = false;
+                    let cid = a_cluster_id[idx];
+                    if cid == 0 {
+                        continue;
+                    }
+                    if cid != cluster_seen {
+                        cluster_seen = cid;
+                        col_mass = 0;
+                    }
+                    let sup = local_support[idx] as u64;
+                    if sup > 0 && col_mass > sup.saturating_mul(STRENGTH) {
+                        let jitter = self.rng.random_range(0..=2);
+                        broken_at = Some(y.saturating_sub(jitter));
+                        break;
+                    }
+                    col_mass += 1;
+                }
+                if let Some(yb) = broken_at {
+                    for ay in 0..yb {
+                        let aidx = ay * WIDTH + x;
+                        if a_cluster_id[aidx] != 0 {
+                            anchored[aidx] = false;
+                        }
                     }
                 }
             }
