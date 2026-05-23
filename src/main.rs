@@ -23,8 +23,8 @@ use worms_ssh::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "worms-ssh",
-    about = "Realtime ASCII artillery arena served over SSH"
+    name = "earthworms-ssh",
+    about = "Text-based artillery game in the spirit of Worms by Team17, served over SSH"
 )]
 struct Args {
     /// TCP address on which the SSH game accepts players.
