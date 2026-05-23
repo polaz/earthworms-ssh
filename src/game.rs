@@ -382,21 +382,17 @@ impl Game {
     }
 
     pub fn broadcast(&mut self) {
-        let frames: Vec<(PlayerId, String)> = self
+        use rayon::prelude::*;
+        let snapshots: Vec<(PlayerId, u32, u32, ColorDepth, GlyphMode)> = self
             .clients
             .values()
-            .map(|client| {
-                (
-                    client.player,
-                    render::frame(
-                        self,
-                        client.player,
-                        client.columns,
-                        client.rows,
-                        client.colors,
-                        client.glyphs,
-                    ),
-                )
+            .map(|c| (c.player, c.columns, c.rows, c.colors, c.glyphs))
+            .collect();
+        let game_ref: &Game = self;
+        let frames: Vec<(PlayerId, String)> = snapshots
+            .par_iter()
+            .map(|&(id, cols, rows, colors, glyphs)| {
+                (id, render::frame(game_ref, id, cols, rows, colors, glyphs))
             })
             .collect();
         let mut stale = Vec::new();
