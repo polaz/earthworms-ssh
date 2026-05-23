@@ -20,6 +20,8 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.js"></script>
 <script>
 (() => {
   const params = new URLSearchParams(location.search);
@@ -40,6 +42,16 @@
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
   fit.fit();
+
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch (_) {
+    try {
+      term.loadAddon(new CanvasAddon.CanvasAddon());
+    } catch (_) { /* fall back to DOM renderer */ }
+  }
 
   const status = document.getElementById("status");
   const proto = location.protocol === "https:" ? "wss" : "ws";
