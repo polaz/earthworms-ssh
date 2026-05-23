@@ -4,11 +4,19 @@ A multiplayer artillery game where the lobby is an SSH server, the arena is ANSI
 
 ## Try it
 
-```sh
-ssh -p 1025 <yourname>@78.108.177.37
+Browser:
+
+```
+https://worms.private.systems
 ```
 
-That is the whole thing. Authentication accepts `none`, the username you typed becomes the name floating over your worm, and you are dropped into the same shared world as everyone else currently connected. Quit with `Ctrl-C`. Be nice. Or don't.
+SSH:
+
+```sh
+ssh -p 1025 <yourname>@worms.private.systems
+```
+
+Either route drops you into the same shared world. Authentication accepts `none`, the username you typed becomes the name floating over your worm, and you are dropped into the same shared world as everyone else currently connected. Quit with `Ctrl-C`. Be nice. Or don't.
 
 The server tries to give you the best output your terminal can handle: truecolor if `COLORTERM=truecolor`, otherwise 256, then 16, then monochrome for `TERM=dumb`. On entry it asks once whether you have a Powerlevel10k-style Nerd Font; press `y` for icon glyphs or just Enter for ASCII.
 
