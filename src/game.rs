@@ -646,7 +646,21 @@ impl Game {
                 y -= 1.0;
             }
             let ny = y + dy;
-            if self.tile(x.round() as i32, ny.round() as i32) == Tile::Air {
+            let xi = x.round() as i32;
+            let nyi = ny.round() as i32;
+            if self.tile(xi, nyi) == Tile::Air {
+                y = ny;
+            } else if dy < 0.0
+                && self.tile(xi - 1, nyi) == Tile::Air
+                && self.tile(xi - 1, y.round() as i32) == Tile::Air
+            {
+                x -= 1.0;
+                y = ny;
+            } else if dy < 0.0
+                && self.tile(xi + 1, nyi) == Tile::Air
+                && self.tile(xi + 1, y.round() as i32) == Tile::Air
+            {
+                x += 1.0;
                 y = ny;
             } else {
                 blocked_y = true;
@@ -1086,6 +1100,17 @@ impl Game {
                 let capacity = dw * STRENGTH_PER_BOND * coh;
                 if dw == 0.0 || load[idx] > capacity {
                     broken[idx] = true;
+                    continue;
+                }
+                let face_down = earth_at(x, y + 1);
+                let diag_down = earth_at(x - 1, y + 1) || earth_at(x + 1, y + 1);
+                if face_down && !diag_down {
+                    let strong_side = |nx: i32, ny: i32| -> bool {
+                        earth_at(nx, ny) && self.cohesion[ny as usize * WIDTH + nx as usize] >= 2
+                    };
+                    if !strong_side(x - 1, y) && !strong_side(x + 1, y) && !strong_side(x, y - 1) {
+                        broken[idx] = true;
+                    }
                 }
             }
         }
@@ -1143,18 +1168,45 @@ impl Game {
                 continue;
             }
             let src_idx = y as usize * WIDTH + x as usize;
-            let prev_cohesion = self.cohesion[src_idx].max(1);
             let prev_hang = self.hang[src_idx];
             self.set_tile(x, y, Tile::Air);
             self.set_tile(x, y + 1, Tile::Earth);
             let dst = (y + 1) as usize * WIDTH + x as usize;
-            self.cohesion[dst] = prev_cohesion;
+            self.cohesion[dst] = 1;
             self.hang[dst] = prev_hang.saturating_add(1);
         }
 
         self.slide_terrain();
         self.diagonal_settle();
+        self.fill_pinholes();
         self.lift_buried_players();
+    }
+
+    fn fill_pinholes(&mut self) {
+        let w = WIDTH as i32;
+        let h = HEIGHT as i32;
+        let mut to_fill: Vec<(i32, i32)> = Vec::new();
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                if self.tile(x, y) != Tile::Air {
+                    continue;
+                }
+                let n = self.tile(x, y - 1) == Tile::Earth;
+                let s = self.tile(x, y + 1) == Tile::Earth;
+                let e = self.tile(x + 1, y) == Tile::Earth;
+                let we = self.tile(x - 1, y) == Tile::Earth;
+                if n && s && e && we {
+                    to_fill.push((x, y));
+                }
+            }
+        }
+        for (x, y) in to_fill {
+            if self.tile(x, y) != Tile::Air {
+                continue;
+            }
+            self.set_tile(x, y, Tile::Earth);
+            self.seed_cohesion(x, y);
+        }
     }
 
     fn diagonal_settle(&mut self) {
