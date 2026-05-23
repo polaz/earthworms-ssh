@@ -15,11 +15,19 @@
 </head>
 <body>
 <div id="wrap">
-  <div id="bar">worms//ssh web · A/D move · W/S aim · Space jump · Enter hold = charge · 1/2 weapon · <span id="status">connecting…</span></div>
+  <div id="bar">
+    worms//ssh web · A/D move · W/S aim · Space jump · Enter hold = charge · 1/2 weapon · <span id="status">connecting…</span>
+    · render:
+    <label><input type="radio" name="rendererpick" value="webgl"> webgl</label>
+    <label><input type="radio" name="rendererpick" value="canvas"> canvas</label>
+    <label><input type="radio" name="rendererpick" value="dom"> dom</label>
+  </div>
   <div id="term"></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.js"></script>
 <script>
 (() => {
   const params = new URLSearchParams(location.search);
@@ -40,6 +48,36 @@
   term.loadAddon(fit);
   term.open(document.getElementById("term"));
   fit.fit();
+
+  const storedRenderer = localStorage.getItem("worms-renderer");
+  const wantedRenderer = (params.get("renderer") || storedRenderer || "webgl").toLowerCase();
+  let activeRenderer = "dom";
+  const tryWebgl = () => {
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+      activeRenderer = "webgl";
+      return true;
+    } catch (_) { return false; }
+  };
+  const tryCanvas = () => {
+    try { term.loadAddon(new CanvasAddon.CanvasAddon()); activeRenderer = "canvas"; return true; }
+    catch (_) { return false; }
+  };
+  if (wantedRenderer === "canvas") { tryCanvas() || tryWebgl(); }
+  else if (wantedRenderer === "dom") { /* keep DOM */ }
+  else { tryWebgl() || tryCanvas(); }
+  for (const r of document.getElementsByName("rendererpick")) {
+    r.checked = r.value === activeRenderer;
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      localStorage.setItem("worms-renderer", r.value);
+      const u = new URL(location.href);
+      u.searchParams.set("renderer", r.value);
+      location.href = u.toString();
+    });
+  }
 
   const status = document.getElementById("status");
   const proto = location.protocol === "https:" ? "wss" : "ws";

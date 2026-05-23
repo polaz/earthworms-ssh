@@ -370,6 +370,9 @@ impl Game {
         self.update_projectiles();
         self.flush_kills();
         self.settle_terrain();
+        if self.tick_number.is_multiple_of(3) {
+            self.compress_cavities();
+        }
         self.process_growth_timers();
         if self.tick_number >= self.next_meteor_tick {
             self.spawn_meteor();
@@ -643,7 +646,21 @@ impl Game {
                 y -= 1.0;
             }
             let ny = y + dy;
-            if self.tile(x.round() as i32, ny.round() as i32) == Tile::Air {
+            let xi = x.round() as i32;
+            let nyi = ny.round() as i32;
+            if self.tile(xi, nyi) == Tile::Air {
+                y = ny;
+            } else if dy < 0.0
+                && self.tile(xi - 1, nyi) == Tile::Air
+                && self.tile(xi - 1, y.round() as i32) == Tile::Air
+            {
+                x -= 1.0;
+                y = ny;
+            } else if dy < 0.0
+                && self.tile(xi + 1, nyi) == Tile::Air
+                && self.tile(xi + 1, y.round() as i32) == Tile::Air
+            {
+                x += 1.0;
                 y = ny;
             } else {
                 blocked_y = true;
@@ -710,9 +727,9 @@ impl Game {
         self.projectiles = remaining;
         for (x, y, owner, weapon) in explosions {
             let (radius, max_dmg) = match weapon {
-                Weapon::Bazooka => (4 * WORLD_SCALE as i32, 800.0),
-                Weapon::Grenade => (8 * WORLD_SCALE as i32, 1200.0),
-                Weapon::Meteor => (6 * WORLD_SCALE as i32, 1500.0),
+                Weapon::Bazooka => (5 * WORLD_SCALE as i32, 1100.0),
+                Weapon::Grenade => (9 * WORLD_SCALE as i32, 1500.0),
+                Weapon::Meteor => (7 * WORLD_SCALE as i32, 1900.0),
             };
             self.explode(x.round() as i32, y.round() as i32, radius, max_dmg, owner);
         }
@@ -824,9 +841,12 @@ impl Game {
     }
 
     fn spawn_meteor(&mut self) {
-        let x = self.rng.random_range(20..(WIDTH as i32 - 20)) as f32;
-        let vx = self.rng.random_range(-0.4..=0.4);
-        let vy = self.rng.random_range(2.5..=4.0);
+        let x = self.rng.random_range(40..(WIDTH as i32 - 40)) as f32;
+        let speed: f32 = self.rng.random_range(1.2..=1.6);
+        let angle_deg: f32 = self.rng.random_range(-35.0..=35.0);
+        let angle = angle_deg.to_radians();
+        let vx = speed * angle.sin();
+        let vy = speed * angle.cos();
         self.projectiles.push(Projectile {
             x,
             y: -SCALE,
@@ -835,7 +855,7 @@ impl Game {
             weapon: Weapon::Meteor,
             vx,
             vy,
-            fuse: TICK_RATE as u16 * 6,
+            fuse: TICK_RATE as u16 * 10,
         });
         self.say("a meteor screams down from the sky".into());
     }
@@ -922,10 +942,11 @@ impl Game {
                         .map(|&px| (cx - px).abs())
                         .min()
                         .unwrap_or(WIDTH as i32);
+                    let d = min_d as u64;
                     let player_w = if min_d < player_buffer {
-                        0u64
+                        d.saturating_mul(d) / 64 + 1
                     } else {
-                        (min_d as u64).saturating_mul(min_d as u64)
+                        d.saturating_mul(d)
                     };
                     let height_left = (top as u64).max(1);
                     let height_w = height_left.saturating_mul(height_left);
@@ -1017,68 +1038,110 @@ impl Game {
     }
 
     fn settle_terrain(&mut self) {
+        const FACE_W: f32 = 2.0;
+        const DIAG_W: f32 = 1.0;
+        const STRENGTH_PER_BOND: f32 = 18.0;
+
+        let w = WIDTH as i32;
+        let h = HEIGHT as i32;
+        let is_earth: Vec<bool> = self.tiles.iter().map(|t| *t == Tile::Earth).collect();
+        let earth_at = |x: i32, y: i32| -> bool {
+            x >= 0 && y >= 0 && x < w && y < h && is_earth[y as usize * WIDTH + x as usize]
+        };
+        let down_weight = |x: i32, y: i32| -> f32 {
+            let mut s = 0.0;
+            if earth_at(x, y + 1) {
+                s += FACE_W;
+            }
+            if earth_at(x - 1, y + 1) {
+                s += DIAG_W;
+            }
+            if earth_at(x + 1, y + 1) {
+                s += DIAG_W;
+            }
+            s
+        };
+
+        let mut load = vec![0.0f32; WIDTH * HEIGHT];
+        for y in 0..h {
+            for x in 0..w {
+                if !earth_at(x, y) {
+                    continue;
+                }
+                let mut incoming = 0.0;
+                if y > 0 {
+                    for dx in [-1i32, 0, 1] {
+                        let ux = x + dx;
+                        let uy = y - 1;
+                        if !earth_at(ux, uy) {
+                            continue;
+                        }
+                        let total = down_weight(ux, uy);
+                        if total <= 0.0 {
+                            continue;
+                        }
+                        let bond = if dx == 0 { FACE_W } else { DIAG_W };
+                        incoming += load[uy as usize * WIDTH + ux as usize] * bond / total;
+                    }
+                }
+                load[y as usize * WIDTH + x as usize] = 1.0 + incoming;
+            }
+        }
+
+        let mut broken = vec![false; WIDTH * HEIGHT];
+        for y in 0..h - 1 {
+            for x in 0..w {
+                if !earth_at(x, y) {
+                    continue;
+                }
+                let dw = down_weight(x, y);
+                let idx = y as usize * WIDTH + x as usize;
+                let coh = self.cohesion[idx].max(1) as f32;
+                let capacity = dw * STRENGTH_PER_BOND * coh;
+                if dw == 0.0 || load[idx] > capacity {
+                    broken[idx] = true;
+                    continue;
+                }
+                let face_down = earth_at(x, y + 1);
+                let diag_down = earth_at(x - 1, y + 1) || earth_at(x + 1, y + 1);
+                if face_down && !diag_down {
+                    let strong_side = |nx: i32, ny: i32| -> bool {
+                        earth_at(nx, ny) && self.cohesion[ny as usize * WIDTH + nx as usize] >= 2
+                    };
+                    if !strong_side(x - 1, y) && !strong_side(x + 1, y) && !strong_side(x, y - 1) {
+                        broken[idx] = true;
+                    }
+                }
+            }
+        }
+
         let mut anchored = vec![false; WIDTH * HEIGHT];
         let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
-        let bottom = HEIGHT as i32 - 1;
-        for x in 0..WIDTH as i32 {
-            if self.tile(x, bottom) == Tile::Earth {
+        let bottom = h - 1;
+        for x in 0..w {
+            if earth_at(x, bottom) {
                 let idx = bottom as usize * WIDTH + x as usize;
                 anchored[idx] = true;
                 queue.push_back((x, bottom));
             }
         }
-        while let Some((x, y)) = queue.pop_front() {
-            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+        while let Some((cx, cy)) = queue.pop_front() {
+            for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
                     continue;
                 }
-                let idx = ny as usize * WIDTH + nx as usize;
-                if !anchored[idx] && self.tile(nx, ny) == Tile::Earth {
-                    anchored[idx] = true;
+                let ni = ny as usize * WIDTH + nx as usize;
+                if !anchored[ni] && earth_at(nx, ny) && !broken[ni] {
+                    anchored[ni] = true;
                     queue.push_back((nx, ny));
                 }
             }
         }
 
-        let mut cluster_id = vec![0u32; WIDTH * HEIGHT];
-        let mut cluster_size: Vec<u32> = vec![0];
-        let mut next_id: u32 = 1;
-        for sy in 0..HEIGHT as i32 {
-            for sx in 0..WIDTH as i32 {
-                let sidx = sy as usize * WIDTH + sx as usize;
-                if anchored[sidx] || self.tile(sx, sy) != Tile::Earth || cluster_id[sidx] != 0 {
-                    continue;
-                }
-                let mut size: u32 = 0;
-                let mut local: VecDeque<(i32, i32)> = VecDeque::new();
-                local.push_back((sx, sy));
-                cluster_id[sidx] = next_id;
-                while let Some((x, y)) = local.pop_front() {
-                    size += 1;
-                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                        if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
-                            continue;
-                        }
-                        let nidx = ny as usize * WIDTH + nx as usize;
-                        if anchored[nidx]
-                            || cluster_id[nidx] != 0
-                            || self.tile(nx, ny) != Tile::Earth
-                        {
-                            continue;
-                        }
-                        cluster_id[nidx] = next_id;
-                        local.push_back((nx, ny));
-                    }
-                }
-                cluster_size.push(size);
-                next_id += 1;
-            }
-        }
-
         let mut to_fall: Vec<(i32, i32)> = Vec::new();
-        for y in 0..HEIGHT as i32 {
-            for x in 0..WIDTH as i32 {
-                if self.tile(x, y) != Tile::Earth {
+        for y in 0..h {
+            for x in 0..w {
+                if !earth_at(x, y) {
                     continue;
                 }
                 let idx = y as usize * WIDTH + x as usize;
@@ -1087,20 +1150,9 @@ impl Game {
                         self.cohesion[idx] = 1;
                     }
                     self.hang[idx] = 0;
-                    continue;
+                } else {
+                    to_fall.push((x, y));
                 }
-                let cid = cluster_id[idx] as usize;
-                if cid == 0 {
-                    continue;
-                }
-                let size = cluster_size[cid] as f64;
-                let coh = self.cohesion[idx].max(1) as f64;
-                let always_falls = cluster_size[cid] <= 4;
-                let p_fall = (size / (10.0 * coh * coh)).clamp(0.0, 1.0);
-                if !always_falls && !self.rng.random_bool(p_fall) {
-                    continue;
-                }
-                to_fall.push((x, y));
             }
         }
 
@@ -1109,24 +1161,161 @@ impl Game {
             if self.tile(x, y) != Tile::Earth {
                 continue;
             }
-            if y + 1 >= HEIGHT as i32 {
+            if y + 1 >= h {
                 continue;
             }
             if self.tile(x, y + 1) != Tile::Air {
                 continue;
             }
             let src_idx = y as usize * WIDTH + x as usize;
-            let prev_cohesion = self.cohesion[src_idx].max(1);
             let prev_hang = self.hang[src_idx];
             self.set_tile(x, y, Tile::Air);
             self.set_tile(x, y + 1, Tile::Earth);
             let dst = (y + 1) as usize * WIDTH + x as usize;
-            self.cohesion[dst] = prev_cohesion;
+            self.cohesion[dst] = 1;
             self.hang[dst] = prev_hang.saturating_add(1);
         }
 
         self.slide_terrain();
+        self.diagonal_settle();
+        self.fill_pinholes();
         self.lift_buried_players();
+    }
+
+    fn fill_pinholes(&mut self) {
+        let w = WIDTH as i32;
+        let h = HEIGHT as i32;
+        let mut to_fill: Vec<(i32, i32)> = Vec::new();
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                if self.tile(x, y) != Tile::Air {
+                    continue;
+                }
+                let n = self.tile(x, y - 1) == Tile::Earth;
+                let s = self.tile(x, y + 1) == Tile::Earth;
+                let e = self.tile(x + 1, y) == Tile::Earth;
+                let we = self.tile(x - 1, y) == Tile::Earth;
+                if n && s && e && we {
+                    to_fill.push((x, y));
+                }
+            }
+        }
+        for (x, y) in to_fill {
+            if self.tile(x, y) != Tile::Air {
+                continue;
+            }
+            self.set_tile(x, y, Tile::Earth);
+            self.seed_cohesion(x, y);
+        }
+    }
+
+    fn diagonal_settle(&mut self) {
+        let w = WIDTH as i32;
+        let h = HEIGHT as i32;
+        let mut xs: Vec<i32> = (0..w).collect();
+        for i in (1..xs.len()).rev() {
+            let j = self.rng.random_range(0..=i);
+            xs.swap(i, j);
+        }
+        for y in (0..h - 1).rev() {
+            for &x in &xs {
+                if self.tile(x, y) != Tile::Earth {
+                    continue;
+                }
+                if self.tile(x, y + 1) != Tile::Earth {
+                    continue;
+                }
+                let left_open = x > 0
+                    && self.tile(x - 1, y) == Tile::Air
+                    && self.tile(x - 1, y + 1) == Tile::Air;
+                let right_open = x < w - 1
+                    && self.tile(x + 1, y) == Tile::Air
+                    && self.tile(x + 1, y + 1) == Tile::Air;
+                let nx = match (left_open, right_open) {
+                    (true, true) => {
+                        if self.rng.random_bool(0.5) {
+                            x - 1
+                        } else {
+                            x + 1
+                        }
+                    }
+                    (true, false) => x - 1,
+                    (false, true) => x + 1,
+                    (false, false) => continue,
+                };
+                let src_idx = y as usize * WIDTH + x as usize;
+                let prev_cohesion = self.cohesion[src_idx].max(1);
+                self.set_tile(x, y, Tile::Air);
+                self.set_tile(nx, y + 1, Tile::Earth);
+                let dst = (y + 1) as usize * WIDTH + nx as usize;
+                self.cohesion[dst] = prev_cohesion;
+                self.hang[dst] = 0;
+            }
+        }
+    }
+
+    fn compress_cavities(&mut self) {
+        let mut sky_air = vec![false; WIDTH * HEIGHT];
+        let mut q: VecDeque<(i32, i32)> = VecDeque::new();
+        for x in 0..WIDTH as i32 {
+            if self.tile(x, 0) == Tile::Air {
+                sky_air[x as usize] = true;
+                q.push_back((x, 0));
+            }
+        }
+        while let Some((x, y)) = q.pop_front() {
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                    continue;
+                }
+                let ni = ny as usize * WIDTH + nx as usize;
+                if !sky_air[ni] && self.tile(nx, ny) == Tile::Air {
+                    sky_air[ni] = true;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+
+        const COMPRESSION_THRESHOLD: u32 = 10;
+        const COMPRESSION_PROB: f64 = 0.25;
+        let mut ops: Vec<(i32, i32, i32)> = Vec::new();
+        for y in 1..HEIGHT as i32 {
+            for x in 0..WIDTH as i32 {
+                let idx = y as usize * WIDTH + x as usize;
+                if sky_air[idx] {
+                    continue;
+                }
+                if self.tile(x, y) != Tile::Air {
+                    continue;
+                }
+                if self.tile(x, y - 1) != Tile::Earth {
+                    continue;
+                }
+                let mut pressure: u32 = 0;
+                let mut top_of_column = y - 1;
+                let mut ay = y - 1;
+                while ay >= 0 && self.tile(x, ay) == Tile::Earth {
+                    pressure += 1;
+                    top_of_column = ay;
+                    ay -= 1;
+                }
+                if pressure < COMPRESSION_THRESHOLD {
+                    continue;
+                }
+                if !self.rng.random_bool(COMPRESSION_PROB) {
+                    continue;
+                }
+                ops.push((x, top_of_column, y));
+            }
+        }
+        for (x, top_y, cavity_y) in ops {
+            if self.tile(x, top_y) != Tile::Earth || self.tile(x, cavity_y) != Tile::Air {
+                continue;
+            }
+            self.set_tile(x, top_y, Tile::Air);
+            self.set_tile(x, cavity_y, Tile::Earth);
+            self.seed_cohesion(x, cavity_y);
+        }
     }
 
     fn slide_terrain(&mut self) {

@@ -38,21 +38,29 @@ pub fn frame(
     }
 
     for projectile in &game.projectiles {
-        plot_world(
-            &mut canvas,
-            projectile.x.round() as i32,
-            projectile.y.round() as i32,
-            match glyphs {
-                GlyphMode::Ascii => projectile.glyph,
-                GlyphMode::Powerlevel10k => '\u{f135}',
-                GlyphMode::Emoji => match projectile.glyph {
-                    '*' => '🚀',
-                    'o' => '💣',
-                    '@' => '☄',
-                    other => other,
-                },
+        let glyph = match glyphs {
+            GlyphMode::Ascii => projectile.glyph,
+            GlyphMode::Powerlevel10k => '\u{f135}',
+            GlyphMode::Emoji => match projectile.glyph {
+                '*' => '🚀',
+                'o' => '💣',
+                '@' => '☄',
+                other => other,
             },
-        );
+        };
+        let px = projectile.x.round() as i32;
+        let py = projectile.y.round() as i32;
+        plot_world(&mut canvas, px, py, glyph);
+        if projectile.glyph == '@' {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    plot_world(&mut canvas, px + dx, py + dy, glyph);
+                }
+            }
+        }
     }
     for blast in &game.blasts {
         let pulse = match glyphs {
