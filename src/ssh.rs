@@ -166,7 +166,7 @@ impl Handler for WormSession {
         self.awaiting_glyph_choice = true;
         session.data(
             channel,
-            b"WORMS//SSH\r\nPowerlevel10k / Nerd Font icons available? [y/N] ".to_vec(),
+            b"WORMS//SSH\r\nGlyph mode: [a]scii (default) / [n]erd-font / [e]moji ? ".to_vec(),
         )?;
         session.channel_success(channel)?;
         Ok(())
@@ -180,10 +180,13 @@ impl Handler for WormSession {
     ) -> Result<(), Self::Error> {
         if self.awaiting_glyph_choice && !self.joined {
             let response = String::from_utf8_lossy(data).to_ascii_lowercase();
-            if response.contains('y') {
+            if response.contains('e') {
+                self.glyphs = Some(GlyphMode::Emoji);
+                self.join_world(channel, session);
+            } else if response.contains('n') || response.contains('y') {
                 self.glyphs = Some(GlyphMode::Powerlevel10k);
                 self.join_world(channel, session);
-            } else if response.contains('n') || response.contains('\r') || response.contains('\n') {
+            } else if response.contains('a') || response.contains('\r') || response.contains('\n') {
                 self.glyphs = Some(GlyphMode::Ascii);
                 self.join_world(channel, session);
             }
