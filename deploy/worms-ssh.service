@@ -1,0 +1,21 @@
+[Unit]
+Description=worms//ssh realtime ASCII arena
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=worms-ssh
+Group=worms-ssh
+WorkingDirectory=/opt/worms-ssh/current
+ExecStart=/opt/worms-ssh/current/worms_ssh --listen 0.0.0.0:1025 --host-key /opt/worms-ssh/shared/host_key
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/worms-ssh/shared
+
+[Install]
+WantedBy=multi-user.target

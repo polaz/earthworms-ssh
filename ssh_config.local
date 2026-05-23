@@ -1,0 +1,11 @@
+Host worms-local
+    HostName 127.0.0.1
+    Port 22345
+    RequestTTY force
+    SetEnv COLORTERM=truecolor
+    PreferredAuthentications none
+    PubkeyAuthentication no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null

@@ -1,0 +1,4 @@
+/target
+host_key
+host_key.pub
+scripts/deploy.sh
