@@ -10,29 +10,36 @@ pub const NATIVE_HEIGHT: usize = 18;
 pub const WORLD_SCALE: usize = 4;
 pub const WIDTH: usize = NATIVE_WIDTH * WORLD_SCALE;
 pub const HEIGHT: usize = NATIVE_HEIGHT * WORLD_SCALE;
-pub const TICK_RATE: u64 = 20;
+pub const TICK_RATE: u64 = 50;
+const REF_RATE: f32 = 20.0;
+const V_SCALE: f32 = REF_RATE / TICK_RATE as f32;
+const A_SCALE: f32 = V_SCALE * V_SCALE;
 const SCALE: f32 = WORLD_SCALE as f32;
-const GRAVITY: f32 = 0.11 * SCALE;
-const MAX_FALL: f32 = 1.45 * SCALE;
-const MOVE_ACCEL: f32 = 0.18 * SCALE;
-const MAX_RUN: f32 = 0.65 * SCALE;
-const FRICTION: f32 = 0.72;
-const SLIDE_ACCEL: f32 = 0.12 * SCALE;
+const GRAVITY: f32 = 0.11 * SCALE * A_SCALE / Y_ASPECT;
+const MAX_FALL: f32 = 1.45 * SCALE * V_SCALE / Y_ASPECT;
+const MOVE_ACCEL: f32 = 0.18 * SCALE * A_SCALE;
+const MAX_RUN: f32 = 0.65 * SCALE * V_SCALE;
+const FRICTION: f32 = 0.876;
+const SLIDE_ACCEL: f32 = 0.12 * SCALE * A_SCALE;
 const SLIDE_LOOKAHEAD: i32 = 2;
 const SLIDE_DROP_THRESHOLD: i32 = 4;
-const FIRE_RELEASE_SILENCE: u64 = TICK_RATE / 4;
-const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
-const POWER_STEP_TICKS: u64 = 2;
-const POWER_STEP_PERCENT: u32 = 5;
-const MAX_PROJECTILE_SPEED: f32 = 9.5;
-const TERRAIN_CAP: usize = WIDTH * HEIGHT / 2;
+const FIRE_RELEASE_SILENCE_FAST: u64 = TICK_RATE / 4;
+const FIRE_RELEASE_SILENCE_SLOW: u64 = TICK_RATE * 6 / 10;
+pub const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
+pub const POWER_STEP_TICKS: u64 = TICK_RATE / 10;
+pub const POWER_STEP_PERCENT: u32 = 5;
+const MAX_PROJECTILE_SPEED: f32 = 6.4 * V_SCALE;
+const TERRAIN_CAP: usize = WIDTH * HEIGHT * 3 / 5;
+const METEOR_INTERVAL_TICKS: u64 = TICK_RATE * 20;
+const METEOR_OWNER: PlayerId = u64::MAX;
 const MOVE_SUBSTEP: f32 = 0.9;
-const FRICTION_GRACE_TICKS: u64 = 3;
-const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
+const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
 const TALUS: i32 = 2;
-const SLIDE_PROBABILITY: f64 = 0.5;
+const SLIDE_BASE_PROBABILITY: f64 = 0.55;
 pub const MAX_HEALTH: i16 = 1000;
-const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 10;
+const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
+pub const Y_ASPECT: f32 = 1.7;
+const AIM_COOLDOWN_TICKS: u64 = TICK_RATE / 8;
 const FEED_TTL_TICKS: u64 = TICK_RATE * 8;
 
 const FRAG_VERBS: &[&str] = &[
@@ -110,6 +117,17 @@ const MUTUAL_VERBS: &[&str] = &[
     "achieved mutually assured deletion",
 ];
 
+const METEOR_VERBS: &[&str] = &[
+    "got cosmically yeeted",
+    "made a fossil of themselves",
+    "lost an argument with a falling rock",
+    "served as the dinosaurs' revenge target",
+    "found out about gravity from space",
+    "was selected by the heavens",
+    "starred in their own extinction event",
+    "received express delivery from the void",
+];
+
 const JOIN_VERBS: &[&str] = &[
     "tunneled into the arena",
     "wormed in",
@@ -126,7 +144,6 @@ const JOIN_VERBS: &[&str] = &[
     "answered the call",
     "showed up with a rocket and a dream",
 ];
-const MAX_BLAST_DAMAGE: f32 = 800.0;
 const MIN_BLAST_DAMAGE: i16 = 40;
 
 pub type PlayerId = u64;
@@ -143,6 +160,7 @@ pub enum ColorDepth {
 pub enum GlyphMode {
     Ascii,
     Powerlevel10k,
+    Emoji,
 }
 
 #[derive(Debug)]
@@ -182,6 +200,7 @@ pub enum Tile {
 pub enum Weapon {
     Bazooka,
     Grenade,
+    Meteor,
 }
 
 #[derive(Debug, Clone)]
@@ -204,11 +223,13 @@ pub struct Player {
     jump: bool,
     pub charge_started: Option<u64>,
     last_charge_pulse: Option<u64>,
+    charge_pulse_count: u8,
     last_move_tick: u64,
     movement_started: u64,
     last_direction: i8,
     last_input_tick: u64,
     regen_carry: i32,
+    next_aim_tick: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +262,16 @@ struct Client {
     glyphs: GlyphMode,
 }
 
+#[derive(Clone, Copy)]
+struct GrowthTimer {
+    cx: i32,
+    cy_origin: i32,
+    radius: i32,
+    cells_left: u16,
+    cells_per_tick: u8,
+    cooldown_left: u16,
+}
+
 pub struct Game {
     pub tiles: Vec<Tile>,
     pub players: HashMap<PlayerId, Player>,
@@ -250,8 +281,11 @@ pub struct Game {
     pub feed: VecDeque<(u64, String)>,
     rng: SmallRng,
     clients: HashMap<PlayerId, Client>,
-    next_growth_tick: u64,
+    growth_timers: Vec<GrowthTimer>,
+    growth_disabled: bool,
+    next_meteor_tick: u64,
     hang: Vec<u16>,
+    cohesion: Vec<u8>,
     pending_kills: Vec<(PlayerId, PlayerId)>,
 }
 
@@ -266,8 +300,11 @@ impl Game {
             feed: VecDeque::new(),
             rng: SmallRng::seed_from_u64(seed),
             clients: HashMap::new(),
-            next_growth_tick: 40,
+            growth_timers: Vec::new(),
+            growth_disabled: false,
+            next_meteor_tick: METEOR_INTERVAL_TICKS,
             hang: vec![0; WIDTH * HEIGHT],
+            cohesion: vec![0; WIDTH * HEIGHT],
             pending_kills: Vec::new(),
         };
         game.generate_world();
@@ -333,12 +370,10 @@ impl Game {
         self.update_projectiles();
         self.flush_kills();
         self.settle_terrain();
-        if self.tick_number >= self.next_growth_tick {
-            self.grow_terrain();
-            let earth = self.earth_count();
-            let fill = (earth as f32 / TERRAIN_CAP as f32).clamp(0.0, 1.0);
-            let delay = (4.0 + fill * fill * 96.0) as u64;
-            self.next_growth_tick = self.tick_number + delay.max(2);
+        self.process_growth_timers();
+        if self.tick_number >= self.next_meteor_tick {
+            self.spawn_meteor();
+            self.next_meteor_tick = self.tick_number + METEOR_INTERVAL_TICKS;
         }
         self.blasts.retain_mut(|blast| {
             blast.age += 1;
@@ -347,21 +382,17 @@ impl Game {
     }
 
     pub fn broadcast(&mut self) {
-        let frames: Vec<(PlayerId, String)> = self
+        use rayon::prelude::*;
+        let snapshots: Vec<(PlayerId, u32, u32, ColorDepth, GlyphMode)> = self
             .clients
             .values()
-            .map(|client| {
-                (
-                    client.player,
-                    render::frame(
-                        self,
-                        client.player,
-                        client.columns,
-                        client.rows,
-                        client.colors,
-                        client.glyphs,
-                    ),
-                )
+            .map(|c| (c.player, c.columns, c.rows, c.colors, c.glyphs))
+            .collect();
+        let game_ref: &Game = self;
+        let frames: Vec<(PlayerId, String)> = snapshots
+            .par_iter()
+            .map(|&(id, cols, rows, colors, glyphs)| {
+                (id, render::frame(game_ref, id, cols, rows, colors, glyphs))
             })
             .collect();
         let mut stale = Vec::new();
@@ -393,7 +424,18 @@ impl Game {
 
     fn set_tile(&mut self, x: i32, y: i32, tile: Tile) {
         if x >= 0 && y >= 0 && x < WIDTH as i32 && y < HEIGHT as i32 {
-            self.tiles[y as usize * WIDTH + x as usize] = tile;
+            let idx = y as usize * WIDTH + x as usize;
+            self.tiles[idx] = tile;
+            if tile == Tile::Air {
+                self.cohesion[idx] = 0;
+            }
+        }
+    }
+
+    fn seed_cohesion(&mut self, x: i32, y: i32) {
+        if x >= 0 && y >= 0 && x < WIDTH as i32 && y < HEIGHT as i32 {
+            let idx = y as usize * WIDTH + x as usize;
+            self.cohesion[idx] = self.rng.random_range(1..=3);
         }
     }
 
@@ -404,6 +446,7 @@ impl Game {
                 .clamp((HEIGHT / 2) as i32, (HEIGHT - 6) as i32);
             for y in surface..HEIGHT as i32 {
                 self.set_tile(x, y, Tile::Earth);
+                self.seed_cohesion(x, y);
             }
         }
         for _ in 0..10 {
@@ -459,8 +502,14 @@ impl Game {
                     }
                 }
                 match terminator {
-                    Some(b'A') => player.aim = (player.aim - 1).clamp(-8, 8),
-                    Some(b'B') => player.aim = (player.aim + 1).clamp(-8, 8),
+                    Some(b'A') if tick >= player.next_aim_tick => {
+                        player.aim = (player.aim - 1).clamp(-8, 8);
+                        player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                    }
+                    Some(b'B') if tick >= player.next_aim_tick => {
+                        player.aim = (player.aim + 1).clamp(-8, 8);
+                        player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                    }
                     Some(b'C') => player.pulse_move(1, tick),
                     Some(b'D') => player.pulse_move(-1, tick),
                     _ => {}
@@ -471,16 +520,24 @@ impl Game {
                 b'a' | b'A' => player.pulse_move(-1, tick),
                 b'd' | b'D' => player.pulse_move(1, tick),
                 b' ' => player.jump = true,
-                b'w' | b'W' | b'j' | b'J' => player.aim = (player.aim - 1).clamp(-8, 8),
-                b's' | b'S' | b'l' | b'L' => player.aim = (player.aim + 1).clamp(-8, 8),
+                b'w' | b'W' | b'j' | b'J' if tick >= player.next_aim_tick => {
+                    player.aim = (player.aim - 1).clamp(-8, 8);
+                    player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                }
+                b's' | b'S' | b'l' | b'L' if tick >= player.next_aim_tick => {
+                    player.aim = (player.aim + 1).clamp(-8, 8);
+                    player.next_aim_tick = tick + AIM_COOLDOWN_TICKS;
+                }
                 b'1' => player.weapon = Weapon::Bazooka,
                 b'2' => player.weapon = Weapon::Grenade,
                 b'\r' | b'\n' | b'x' | b'X' | b'f' | b'F' => {
                     if player.charge_started.is_none() && player.fire_cooldown == 0 {
                         player.charge_started = Some(tick);
+                        player.charge_pulse_count = 0;
                     }
                     if player.charge_started.is_some() {
                         player.last_charge_pulse = Some(tick);
+                        player.charge_pulse_count = player.charge_pulse_count.saturating_add(1);
                     }
                 }
                 _ => {}
@@ -533,13 +590,18 @@ impl Game {
                     player.vx *= FRICTION;
                 }
                 if player.jump && grounded {
-                    player.vy = -(0.7 * SCALE) - player.vx.abs() * 0.3;
+                    player.vy = (-(0.7 * SCALE) - player.vx.abs() * 0.3) * V_SCALE / Y_ASPECT;
                 }
                 player.vy = (player.vy + GRAVITY).min(MAX_FALL);
+                let silence_threshold = if player.charge_pulse_count >= 2 {
+                    FIRE_RELEASE_SILENCE_FAST
+                } else {
+                    FIRE_RELEASE_SILENCE_SLOW
+                };
                 if let Some(start) = player.charge_started
                     && (self.tick_number.saturating_sub(start) >= MAX_CHARGE_TICKS
                         || player.last_charge_pulse.is_some_and(|pulse| {
-                            self.tick_number.saturating_sub(pulse) >= FIRE_RELEASE_SILENCE
+                            self.tick_number.saturating_sub(pulse) >= silence_threshold
                         }))
                     && player.fire_cooldown == 0
                 {
@@ -549,6 +611,7 @@ impl Game {
                     projectile = Some(player.fire(power_pct));
                     player.charge_started = None;
                     player.last_charge_pulse = None;
+                    player.charge_pulse_count = 0;
                 }
                 player.move_impulse = 0.0;
                 player.jump = false;
@@ -646,15 +709,16 @@ impl Game {
         }
         self.projectiles = remaining;
         for (x, y, owner, weapon) in explosions {
-            let radius = match weapon {
-                Weapon::Bazooka => 4 * WORLD_SCALE as i32,
-                Weapon::Grenade => 5 * WORLD_SCALE as i32,
+            let (radius, max_dmg) = match weapon {
+                Weapon::Bazooka => (4 * WORLD_SCALE as i32, 800.0),
+                Weapon::Grenade => (8 * WORLD_SCALE as i32, 1200.0),
+                Weapon::Meteor => (6 * WORLD_SCALE as i32, 1500.0),
             };
-            self.explode(x.round() as i32, y.round() as i32, radius, owner);
+            self.explode(x.round() as i32, y.round() as i32, radius, max_dmg, owner);
         }
     }
 
-    fn explode(&mut self, x: i32, y: i32, radius: i32, owner: PlayerId) {
+    fn explode(&mut self, x: i32, y: i32, radius: i32, max_dmg: f32, owner: PlayerId) {
         self.carve(x, y, radius);
         self.blasts.push(Blast {
             x,
@@ -668,17 +732,17 @@ impl Game {
                 continue;
             }
             let dx = player.x - x as f32;
-            let dy = player.y - y as f32;
+            let dy = (player.y - y as f32) * Y_ASPECT;
             let distance = (dx * dx + dy * dy).sqrt();
             if distance > radius as f32 + 1.5 {
                 continue;
             }
-            let scale = MAX_BLAST_DAMAGE / (radius as f32 + 2.0);
+            let scale = max_dmg / (radius as f32 + 2.0);
             let damage = ((radius as f32 + 2.0 - distance) * scale)
-                .clamp(MIN_BLAST_DAMAGE as f32, MAX_BLAST_DAMAGE) as i16;
+                .clamp(MIN_BLAST_DAMAGE as f32, max_dmg) as i16;
             player.health -= damage;
-            player.vx += dx.signum() * 0.8 * SCALE;
-            player.vy = -0.7 * SCALE;
+            player.vx += dx.signum() * 0.8 * SCALE * V_SCALE;
+            player.vy = -0.7 * SCALE * V_SCALE / Y_ASPECT;
             if player.health <= 0 {
                 player.deaths += 1;
                 player.respawn_ticks = (TICK_RATE * 3) as u16;
@@ -719,7 +783,10 @@ impl Game {
                 .get(&v1)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            if mutual.is_some() {
+            if k1 == METEOR_OWNER {
+                let verb = METEOR_VERBS[self.rng.random_range(0..METEOR_VERBS.len())];
+                self.say(format!("{v1_name} {verb}"));
+            } else if mutual.is_some() {
                 let k1_name = self
                     .players
                     .get(&k1)
@@ -743,55 +810,202 @@ impl Game {
     }
 
     fn carve(&mut self, cx: i32, cy: i32, radius: i32) {
-        for y in (cy - radius)..=(cy + radius) {
+        let r2 = (radius as f32) * (radius as f32);
+        let ry = (radius as f32 / Y_ASPECT).ceil() as i32;
+        for y in (cy - ry)..=(cy + ry) {
             for x in (cx - radius)..=(cx + radius) {
-                let dx = x - cx;
-                let dy = y - cy;
-                if dx * dx + dy * dy <= radius * radius {
+                let dx = (x - cx) as f32;
+                let dy = (y - cy) as f32 * Y_ASPECT;
+                if dx * dx + dy * dy <= r2 {
                     self.set_tile(x, y, Tile::Air);
                 }
             }
         }
     }
 
-    fn grow_terrain(&mut self) {
-        let earth = self.earth_count();
-        if earth >= TERRAIN_CAP {
+    fn spawn_meteor(&mut self) {
+        let x = self.rng.random_range(20..(WIDTH as i32 - 20)) as f32;
+        let vx = self.rng.random_range(-0.4..=0.4);
+        let vy = self.rng.random_range(2.5..=4.0);
+        self.projectiles.push(Projectile {
+            x,
+            y: -SCALE,
+            glyph: '@',
+            owner: METEOR_OWNER,
+            weapon: Weapon::Meteor,
+            vx,
+            vy,
+            fuse: TICK_RATE as u16 * 6,
+        });
+        self.say("a meteor screams down from the sky".into());
+    }
+
+    fn process_growth_timers(&mut self) {
+        if self.growth_disabled {
+            self.growth_timers.clear();
             return;
         }
-        let deficit = (TERRAIN_CAP - earth) as f32 / TERRAIN_CAP as f32;
-        let coef = (WORLD_SCALE * WORLD_SCALE * 64) as f32;
-        let burst = ((deficit * deficit * coef) as usize)
-            .max(1)
-            .min(TERRAIN_CAP - earth);
+        let earth = self.earth_count();
+        let abs_fill = earth as f32 / (WIDTH * HEIGHT) as f32;
+        let desired = if abs_fill >= 0.55 || earth >= TERRAIN_CAP {
+            0
+        } else {
+            (20.0 * (1.0 - abs_fill * 2.0)).round().max(1.0) as usize
+        };
+        let cluster_size = (200.0 - 300.0 * abs_fill).clamp(50.0, 200.0) as u16;
+        let cooldown_secs = 3.0 * (20.0_f32 / 3.0).powf((abs_fill / 0.55).clamp(0.0, 1.0));
+        let cooldown_ticks = (cooldown_secs * TICK_RATE as f32) as u16;
+        let pour_ticks = TICK_RATE as u16;
 
-        let mut placed = 0;
-        let mut attempts = 0;
-        while placed < burst && attempts < burst * 8 {
-            attempts += 1;
-            let x = self.rng.random_range(1..(WIDTH - 1)) as i32;
+        while self.growth_timers.len() < desired {
+            let phase = self.rng.random_range(0..=cooldown_ticks);
+            let mut drip = self.new_drip(cluster_size, pour_ticks);
+            drip.cells_left = 0;
+            drip.cooldown_left = phase;
+            self.growth_timers.push(drip);
+        }
+        while self.growth_timers.len() > desired {
+            self.growth_timers.pop();
+        }
+
+        for i in 0..self.growth_timers.len() {
+            if self.growth_timers[i].cells_left > 0 {
+                let cx = self.growth_timers[i].cx;
+                let radius = self.growth_timers[i].radius;
+                let cy_origin = self.growth_timers[i].cy_origin;
+                let per_tick = self.growth_timers[i].cells_per_tick.max(1);
+                for _ in 0..per_tick {
+                    if self.growth_timers[i].cells_left == 0 {
+                        break;
+                    }
+                    if self.drip_one_cell(cx, radius, cy_origin) {
+                        self.growth_timers[i].cells_left -= 1;
+                    } else {
+                        self.growth_timers[i].cells_left = 0;
+                        break;
+                    }
+                }
+            } else if self.growth_timers[i].cooldown_left > 0 {
+                self.growth_timers[i].cooldown_left -= 1;
+            } else {
+                let mut drip = self.new_drip(cluster_size, pour_ticks);
+                drip.cooldown_left = cooldown_ticks;
+                self.growth_timers[i] = drip;
+            }
+        }
+    }
+
+    fn new_drip(&mut self, cluster_size: u16, pour_ticks: u16) -> GrowthTimer {
+        let radius_est = (((cluster_size as f32).sqrt() * Y_ASPECT.sqrt()) as i32).clamp(3, 16);
+        let player_buffer = radius_est + WORLD_SCALE as i32 * 3;
+        let player_xs: Vec<i32> = self
+            .players
+            .values()
+            .filter(|p| p.respawn_ticks == 0)
+            .map(|p| p.x as i32)
+            .collect();
+        let mut candidates: Vec<(i32, i32)> = Vec::new();
+        for x in 1..(WIDTH as i32 - 1) {
             let Some((_, top)) = self.supported_growth_site(x) else {
                 continue;
             };
-            let left = self.surface_height(x - 1).unwrap_or(HEIGHT as i32);
-            let right = self.surface_height(x + 1).unwrap_or(HEIGHT as i32);
-            let neighbor_floor = left.max(right);
-            if top < neighbor_floor - 2 {
-                continue;
-            }
-            let max_push = ((neighbor_floor - top + 2).max(1) as usize).min(3);
-            let push = self.rng.random_range(1..=max_push).min(burst - placed) as i32;
-            for k in 0..push {
-                let y = top - k;
-                if y < 0 {
+            candidates.push((x, top));
+        }
+        let cx = if candidates.is_empty() {
+            self.rng.random_range(1..(WIDTH as i32 - 1))
+        } else {
+            let weights: Vec<u64> = candidates
+                .iter()
+                .map(|&(cx, top)| {
+                    let min_d = player_xs
+                        .iter()
+                        .map(|&px| (cx - px).abs())
+                        .min()
+                        .unwrap_or(WIDTH as i32);
+                    let player_w = if min_d < player_buffer {
+                        0u64
+                    } else {
+                        (min_d as u64).saturating_mul(min_d as u64)
+                    };
+                    let height_left = (top as u64).max(1);
+                    let height_w = height_left.saturating_mul(height_left);
+                    player_w.saturating_mul(height_w).max(1)
+                })
+                .collect();
+            let total: u64 = weights.iter().sum();
+            let mut roll = self.rng.random_range(0..total);
+            let mut chosen = candidates[candidates.len() - 1].0;
+            for ((cx, _), &w) in candidates.iter().zip(weights.iter()) {
+                if roll < w {
+                    chosen = *cx;
                     break;
                 }
-                self.set_tile(x, y, Tile::Earth);
-                self.hang[y as usize * WIDTH + x as usize] = 0;
-                placed += 1;
+                roll -= w;
             }
-            self.lift_buried_players();
+            chosen
+        };
+        let cy_origin = self
+            .supported_growth_site(cx)
+            .map(|(_, y)| y)
+            .unwrap_or(HEIGHT as i32 - 1);
+        let radius = (((cluster_size as f32).sqrt() * Y_ASPECT.sqrt()) as i32).clamp(3, 16);
+        let cells_per_tick = cluster_size.div_ceil(pour_ticks.max(1)).clamp(1, 255) as u8;
+        GrowthTimer {
+            cx,
+            cy_origin,
+            radius,
+            cells_left: cluster_size,
+            cells_per_tick,
+            cooldown_left: 0,
         }
+    }
+
+    fn drip_one_cell(&mut self, cx: i32, radius: i32, cy_origin: i32) -> bool {
+        if self.earth_count() >= TERRAIN_CAP {
+            return false;
+        }
+        for _ in 0..16 {
+            let dx1 = self.rng.random_range(-radius..=radius);
+            let dx2 = self.rng.random_range(-radius..=radius);
+            let dx = (dx1 + dx2) / 2;
+            let nx = cx + dx;
+            if nx < 1 || nx >= WIDTH as i32 - 1 {
+                continue;
+            }
+            let Some((_, top)) = self.supported_growth_site(nx) else {
+                continue;
+            };
+            if top < 3 {
+                continue;
+            }
+            let height_pct = ((HEIGHT as i32 - top) * 100) / HEIGHT as i32;
+            if height_pct > 50 {
+                let extra = (height_pct - 50) as f64 / 50.0;
+                let reject_p = extra * extra;
+                if self.rng.random_bool(reject_p.clamp(0.0, 0.95)) {
+                    continue;
+                }
+            }
+            let dome_h = (((radius * radius - dx * dx).max(0) as f32).sqrt() / Y_ASPECT) as i32;
+            let rise = cy_origin - top;
+            if rise >= dome_h {
+                continue;
+            }
+            self.set_tile(nx, top, Tile::Earth);
+            self.seed_cohesion(nx, top);
+            self.hang[top as usize * WIDTH + nx as usize] = 0;
+            return true;
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn grow_terrain(&mut self) {
+        let drip = self.new_drip(60, 1);
+        for _ in 0..60 {
+            self.drip_one_cell(drip.cx, drip.radius, drip.cy_origin);
+        }
+        self.lift_buried_players();
     }
 
     fn supported_growth_site(&self, x: i32) -> Option<(i32, i32)> {
@@ -803,26 +1017,114 @@ impl Game {
     }
 
     fn settle_terrain(&mut self) {
-        for y in (0..HEIGHT as i32 - 1).rev() {
+        let mut anchored = vec![false; WIDTH * HEIGHT];
+        let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
+        let bottom = HEIGHT as i32 - 1;
+        for x in 0..WIDTH as i32 {
+            if self.tile(x, bottom) == Tile::Earth {
+                let idx = bottom as usize * WIDTH + x as usize;
+                anchored[idx] = true;
+                queue.push_back((x, bottom));
+            }
+        }
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                    continue;
+                }
+                let idx = ny as usize * WIDTH + nx as usize;
+                if !anchored[idx] && self.tile(nx, ny) == Tile::Earth {
+                    anchored[idx] = true;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+
+        let mut cluster_id = vec![0u32; WIDTH * HEIGHT];
+        let mut cluster_size: Vec<u32> = vec![0];
+        let mut next_id: u32 = 1;
+        for sy in 0..HEIGHT as i32 {
+            for sx in 0..WIDTH as i32 {
+                let sidx = sy as usize * WIDTH + sx as usize;
+                if anchored[sidx] || self.tile(sx, sy) != Tile::Earth || cluster_id[sidx] != 0 {
+                    continue;
+                }
+                let mut size: u32 = 0;
+                let mut local: VecDeque<(i32, i32)> = VecDeque::new();
+                local.push_back((sx, sy));
+                cluster_id[sidx] = next_id;
+                while let Some((x, y)) = local.pop_front() {
+                    size += 1;
+                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                        if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                            continue;
+                        }
+                        let nidx = ny as usize * WIDTH + nx as usize;
+                        if anchored[nidx]
+                            || cluster_id[nidx] != 0
+                            || self.tile(nx, ny) != Tile::Earth
+                        {
+                            continue;
+                        }
+                        cluster_id[nidx] = next_id;
+                        local.push_back((nx, ny));
+                    }
+                }
+                cluster_size.push(size);
+                next_id += 1;
+            }
+        }
+
+        let mut to_fall: Vec<(i32, i32)> = Vec::new();
+        for y in 0..HEIGHT as i32 {
             for x in 0..WIDTH as i32 {
                 if self.tile(x, y) != Tile::Earth {
                     continue;
                 }
                 let idx = y as usize * WIDTH + x as usize;
-                if self.tile(x, y + 1) == Tile::Air {
-                    self.hang[idx] = self.hang[idx].saturating_add(1);
-                    if self.hang[idx] >= HANG_FALL_DELAY {
-                        self.set_tile(x, y, Tile::Air);
-                        self.set_tile(x, y + 1, Tile::Earth);
-                        let below = (y + 1) as usize * WIDTH + x as usize;
-                        self.hang[below] = self.hang[idx];
-                        self.hang[idx] = 0;
+                if anchored[idx] {
+                    if self.hang[idx] >= 6 {
+                        self.cohesion[idx] = 1;
                     }
-                } else {
                     self.hang[idx] = 0;
+                    continue;
                 }
+                let cid = cluster_id[idx] as usize;
+                if cid == 0 {
+                    continue;
+                }
+                let size = cluster_size[cid] as f64;
+                let coh = self.cohesion[idx].max(1) as f64;
+                let always_falls = cluster_size[cid] <= 4;
+                let p_fall = (size / (10.0 * coh * coh)).clamp(0.0, 1.0);
+                if !always_falls && !self.rng.random_bool(p_fall) {
+                    continue;
+                }
+                to_fall.push((x, y));
             }
         }
+
+        to_fall.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
+        for (x, y) in to_fall {
+            if self.tile(x, y) != Tile::Earth {
+                continue;
+            }
+            if y + 1 >= HEIGHT as i32 {
+                continue;
+            }
+            if self.tile(x, y + 1) != Tile::Air {
+                continue;
+            }
+            let src_idx = y as usize * WIDTH + x as usize;
+            let prev_cohesion = self.cohesion[src_idx].max(1);
+            let prev_hang = self.hang[src_idx];
+            self.set_tile(x, y, Tile::Air);
+            self.set_tile(x, y + 1, Tile::Earth);
+            let dst = (y + 1) as usize * WIDTH + x as usize;
+            self.cohesion[dst] = prev_cohesion;
+            self.hang[dst] = prev_hang.saturating_add(1);
+        }
+
         self.slide_terrain();
         self.lift_buried_players();
     }
@@ -838,7 +1140,10 @@ impl Game {
             let Some(top) = self.surface_height(x) else {
                 continue;
             };
-            if top + 1 < HEIGHT as i32 && self.tile(x, top + 1) != Tile::Earth {
+            if top >= HEIGHT as i32 - 1 {
+                continue;
+            }
+            if self.tile(x, top + 1) != Tile::Earth {
                 continue;
             }
             let left = self.surface_height(x - 1).unwrap_or(HEIGHT as i32);
@@ -848,7 +1153,28 @@ impl Game {
             if left_diff < TALUS && right_diff < TALUS {
                 continue;
             }
-            if !self.rng.random_bool(SLIDE_PROBABILITY) {
+            let mut linked = self.cohesion[top as usize * WIDTH + x as usize].max(1);
+            for dx in [-2, -1, 1, 2] {
+                let nx = x + dx;
+                if nx < 0 || nx >= WIDTH as i32 {
+                    continue;
+                }
+                let mid = x + dx.signum();
+                if mid < 0 || mid >= WIDTH as i32 || self.surface_height(mid).is_none() {
+                    continue;
+                }
+                if let Some(ny) = self.surface_height(nx) {
+                    let n_idx = ny as usize * WIDTH + nx as usize;
+                    let n_coh = self.cohesion[n_idx];
+                    if dx.abs() == 1 {
+                        linked = linked.max(n_coh);
+                    } else if n_coh >= 2 {
+                        linked = linked.max(n_coh.saturating_sub(1).max(1));
+                    }
+                }
+            }
+            let slide_p = (SLIDE_BASE_PROBABILITY / linked as f64).clamp(0.05, 0.9);
+            if !self.rng.random_bool(slide_p) {
                 continue;
             }
             let go_left = match left_diff.cmp(&right_diff) {
@@ -867,8 +1193,10 @@ impl Game {
             if target_y < 0 || self.tile(nx, target_y) != Tile::Air {
                 continue;
             }
+            let prev_cohesion = self.cohesion[top as usize * WIDTH + x as usize];
             self.set_tile(x, top, Tile::Air);
             self.set_tile(nx, target_y, Tile::Earth);
+            self.cohesion[target_y as usize * WIDTH + nx as usize] = prev_cohesion.max(1);
             self.hang[top as usize * WIDTH + x as usize] = 0;
             self.hang[target_y as usize * WIDTH + nx as usize] = 0;
         }
@@ -903,7 +1231,7 @@ impl Game {
                 }
             } else if let Some(player) = self.players.get_mut(&id) {
                 player.y = y;
-                player.vy = player.vy.min(-0.25 * SCALE);
+                player.vy = player.vy.min(-0.25 * SCALE * V_SCALE / Y_ASPECT);
             }
         }
         for (_, name) in buried {
@@ -945,11 +1273,13 @@ impl Player {
             jump: false,
             charge_started: None,
             last_charge_pulse: None,
+            charge_pulse_count: 0,
             last_move_tick: 0,
             movement_started: 0,
             last_direction: 0,
             last_input_tick: 0,
             regen_carry: 0,
+            next_aim_tick: 0,
         }
     }
 
@@ -961,6 +1291,12 @@ impl Player {
         self.vx = 0.0;
         self.vy = 0.0;
         self.regen_carry = 0;
+        self.charge_started = None;
+        self.last_charge_pulse = None;
+        self.charge_pulse_count = 0;
+        self.fire_cooldown = 0;
+        self.move_impulse = 0.0;
+        self.jump = false;
     }
 
     fn pulse_move(&mut self, direction: i8, tick: u64) {
@@ -973,7 +1309,7 @@ impl Player {
         }
         let held_ticks = tick.saturating_sub(self.movement_started).min(24);
         let acceleration = if gap <= 4 {
-            MOVE_ACCEL + held_ticks as f32 * 0.012 * SCALE
+            MOVE_ACCEL + held_ticks as f32 * 0.012 * SCALE * A_SCALE
         } else {
             MOVE_ACCEL
         };
@@ -988,10 +1324,12 @@ impl Player {
         self.fire_cooldown = match self.weapon {
             Weapon::Bazooka => 12,
             Weapon::Grenade => 20,
+            Weapon::Meteor => 0,
         };
         let weapon_factor = match self.weapon {
-            Weapon::Bazooka => 1.0,
-            Weapon::Grenade => 0.85,
+            Weapon::Bazooka => 1.2,
+            Weapon::Grenade => 0.9,
+            Weapon::Meteor => 1.0,
         };
         let speed = MAX_PROJECTILE_SPEED * power_pct as f32 / 100.0 * weapon_factor;
         let angle = self.aim as f32 * std::f32::consts::PI / 16.0;
@@ -1003,6 +1341,7 @@ impl Player {
             glyph: match self.weapon {
                 Weapon::Bazooka => '*',
                 Weapon::Grenade => 'o',
+                Weapon::Meteor => '@',
             },
             owner: self.id,
             weapon: self.weapon,
@@ -1011,6 +1350,7 @@ impl Player {
             fuse: match self.weapon {
                 Weapon::Bazooka => 200,
                 Weapon::Grenade => 240,
+                Weapon::Meteor => 200,
             },
         }
     }
@@ -1068,7 +1408,7 @@ mod tests {
         target.y = 12.0;
         game.set_tile(30, 12, Tile::Earth);
 
-        game.explode(30, 12, 4, 1);
+        game.explode(30, 12, 4, 800.0, 1);
 
         assert_eq!(game.tile(30, 12), Tile::Air);
         assert!(game.players[&2].health < MAX_HEALTH);
@@ -1082,7 +1422,7 @@ mod tests {
         target.x = 20.0;
         target.y = 10.0;
         target.health = 1;
-        game.explode(20, 10, 5, 1);
+        game.explode(20, 10, 5, 800.0, 1);
         assert!(game.players[&1].respawn_ticks > 0);
 
         for _ in 0..=(TICK_RATE * 3) {
@@ -1097,35 +1437,27 @@ mod tests {
     fn growing_earth_lifts_a_worm_standing_on_new_growth() {
         let mut game = Game::new(2);
         join(&mut game, 1, "lifted");
-        game.tiles.fill(Tile::Air);
-        for x in 1..(WIDTH - 1) as i32 {
-            game.set_tile(x, HEIGHT as i32 - 1, Tile::Earth);
-        }
-        game.players.get_mut(&1).expect("worm exists").x = 50.0;
+        let wx = 50;
+        game.players.get_mut(&1).expect("worm exists").x = wx as f32;
         game.players.get_mut(&1).expect("worm exists").y = HEIGHT as f32 - 2.0;
-        for _ in 0..300 {
-            game.grow_terrain();
-            if game.tile(50, HEIGHT as i32 - 2) == Tile::Earth {
-                break;
-            }
-        }
-
-        assert_eq!(game.tile(50, HEIGHT as i32 - 2), Tile::Earth);
+        game.set_tile(wx, HEIGHT as i32 - 2, Tile::Earth);
+        game.lift_buried_players();
         assert!(game.players[&1].y < HEIGHT as f32 - 2.0);
     }
 
     #[test]
-    fn terrain_growth_never_exceeds_half_of_the_arena() {
+    fn terrain_growth_respects_the_cap() {
         let mut game = Game::new(3);
         game.tiles.fill(Tile::Earth);
-        for cell in game.tiles.iter_mut().take(WIDTH * HEIGHT / 2) {
+        for cell in game.tiles.iter_mut().take(WIDTH * HEIGHT / 3) {
             *cell = Tile::Air;
         }
-        assert_eq!(game.earth_count(), WIDTH * HEIGHT / 2);
+        let before = game.earth_count();
+        assert!(before >= TERRAIN_CAP);
 
         game.grow_terrain();
 
-        assert_eq!(game.earth_count(), WIDTH * HEIGHT / 2);
+        assert_eq!(game.earth_count(), before);
     }
 
     #[test]
@@ -1182,9 +1514,9 @@ mod tests {
         game.tiles.fill(Tile::Air);
         game.set_tile(44, 4, Tile::Earth);
         game.set_tile(44, 9, Tile::Earth);
-        game.next_growth_tick = u64::MAX;
+        game.growth_disabled = true;
 
-        for _ in 0..(HANG_FALL_DELAY as i32 + HEIGHT as i32 * 2) {
+        for _ in 0..(HEIGHT as i32 * 2) {
             game.tick();
         }
 
@@ -1254,7 +1586,7 @@ mod tests {
         quick.tiles.fill(Tile::Air);
         quick.players.get_mut(&1).expect("worm exists").y = 3.0;
         quick.handle_input(1, b"\r");
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             quick.tick();
         }
         let quick_speed = quick.projectiles[0].vx.abs();
@@ -1264,11 +1596,11 @@ mod tests {
         charged.tiles.fill(Tile::Air);
         charged.players.get_mut(&1).expect("worm exists").y = 3.0;
         charged.handle_input(1, b"\r");
-        for _ in 0..12 {
+        for _ in 0..40 {
             charged.tick();
             charged.handle_input(1, b"\r");
         }
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             charged.tick();
         }
         let charged_speed = charged.projectiles[0].vx.abs();
@@ -1285,7 +1617,7 @@ mod tests {
         single.handle_input(1, b"\r");
         single.tick();
         single.handle_input(1, b"\r");
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             single.tick();
         }
 
@@ -1296,7 +1628,7 @@ mod tests {
         spammed.handle_input(1, b"\r\r\r\r\r");
         spammed.tick();
         spammed.handle_input(1, b"\r\r\r\r\r");
-        for _ in 0..=FIRE_RELEASE_SILENCE {
+        for _ in 0..=FIRE_RELEASE_SILENCE_SLOW {
             spammed.tick();
         }
 
@@ -1332,6 +1664,6 @@ mod tests {
 
         assert_eq!(game.players[&1].vx, before_velocity);
         assert_eq!(game.players[&1].charge_started, before_charge);
-        assert_eq!(game.players[&1].aim, -3);
+        assert_eq!(game.players[&1].aim, -2);
     }
 }

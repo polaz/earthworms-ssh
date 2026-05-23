@@ -40,6 +40,7 @@ struct AppState {
 struct WsQuery {
     cols: Option<u32>,
     rows: Option<u32>,
+    glyphs: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,7 +108,11 @@ async fn handle_socket(mut socket: WebSocket, name: String, q: WsQuery, state: A
             columns: cols,
             rows,
             colors: ColorDepth::TrueColor,
-            glyphs: GlyphMode::Ascii,
+            glyphs: match q.glyphs.as_deref() {
+                Some("emoji") => GlyphMode::Emoji,
+                Some("nerd") => GlyphMode::Powerlevel10k,
+                _ => GlyphMode::Ascii,
+            },
         })
         .is_err()
     {

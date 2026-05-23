@@ -4,11 +4,7 @@ A multiplayer artillery game where the lobby is an SSH server, the arena is ANSI
 
 ## Try it
 
-Browser:
-
-```
-https://worms.private.systems
-```
+Browser: **<https://worms.private.systems>**
 
 SSH:
 

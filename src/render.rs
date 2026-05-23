@@ -1,7 +1,8 @@
 use std::fmt::Write;
 
 use crate::game::{
-    ColorDepth, Game, GlyphMode, HEIGHT, MAX_HEALTH, PlayerId, Tile, WIDTH, WORLD_SCALE, Weapon,
+    ColorDepth, Game, GlyphMode, HEIGHT, MAX_CHARGE_TICKS, MAX_HEALTH, POWER_STEP_PERCENT,
+    POWER_STEP_TICKS, PlayerId, TICK_RATE, Tile, WIDTH, WORLD_SCALE, Weapon, Y_ASPECT,
 };
 
 const MAX_VIEWPORT_WIDTH: usize = 300;
@@ -17,9 +18,13 @@ pub fn frame(
 ) -> String {
     let terminal_width = (columns as usize).saturating_sub(1).max(6);
     let feed_lines = usize::from(rows >= 10) * 2;
-    let viewport_width = terminal_width
-        .saturating_sub(2)
-        .clamp(4, MAX_VIEWPORT_WIDTH);
+    let cell_factor: usize = if matches!(glyphs, GlyphMode::Emoji) {
+        2
+    } else {
+        1
+    };
+    let viewport_width =
+        (terminal_width.saturating_sub(2) / cell_factor).clamp(4, MAX_VIEWPORT_WIDTH);
     let viewport_height = (rows as usize)
         .saturating_sub(4 + feed_lines)
         .clamp(2, MAX_VIEWPORT_HEIGHT);
@@ -40,6 +45,12 @@ pub fn frame(
             match glyphs {
                 GlyphMode::Ascii => projectile.glyph,
                 GlyphMode::Powerlevel10k => '\u{f135}',
+                GlyphMode::Emoji => match projectile.glyph {
+                    '*' => '🚀',
+                    'o' => '💣',
+                    '@' => '☄',
+                    other => other,
+                },
             },
         );
     }
@@ -48,6 +59,7 @@ pub fn frame(
             GlyphMode::Ascii if blast.age % 2 == 0 => '@',
             GlyphMode::Ascii => '*',
             GlyphMode::Powerlevel10k => '\u{f0e7}',
+            GlyphMode::Emoji => '💥',
         };
         plot_world(&mut canvas, blast.x, blast.y, pulse);
         plot_world(&mut canvas, blast.x - 1, blast.y, pulse);
@@ -61,26 +73,37 @@ pub fn frame(
                 (GlyphMode::Ascii, false) => '<',
                 (GlyphMode::Powerlevel10k, true) => '\u{e0b0}',
                 (GlyphMode::Powerlevel10k, false) => '\u{e0b2}',
+                (GlyphMode::Emoji, true) => '👉',
+                (GlyphMode::Emoji, false) => '👈',
             };
             let worm = match glyphs {
                 GlyphMode::Ascii if player.id == viewer => '@',
                 GlyphMode::Ascii => 'w',
                 GlyphMode::Powerlevel10k if player.id == viewer => '\u{f188}',
                 GlyphMode::Powerlevel10k => '\u{f2db}',
+                GlyphMode::Emoji if player.id == viewer => '🐛',
+                GlyphMode::Emoji => '🪱',
             };
             if player.id == viewer {
-                let aim_mag = i32::from(player.aim).abs();
-                let horiz = (WORLD_SCALE as i32 * 4)
-                    .saturating_sub(aim_mag * WORLD_SCALE as i32 / 4)
-                    .max(WORLD_SCALE as i32);
-                plot_world(
+                let cw = canvas.first().map_or(0, Vec::len) as i32;
+                let ch_h = canvas.len() as i32;
+                let cwx = player.x.round() as i32 * cw / WIDTH as i32;
+                let cwy = player.y.round() as i32 * ch_h / HEIGHT as i32;
+                let angle = player.aim as f32 * std::f32::consts::PI / 16.0;
+                let radius_chars: f32 = 5.0;
+                let cdx = (radius_chars * angle.cos() * player.facing as f32).round() as i32;
+                let cdy = (radius_chars * angle.sin() / Y_ASPECT).round() as i32;
+                plot_canvas_styled(
                     &mut canvas,
-                    player.x.round() as i32 + player.facing as i32 * horiz,
-                    player.y.round() as i32 + i32::from(player.aim) * WORLD_SCALE as i32 * 3 / 4,
+                    &mut overlay,
+                    cwx + cdx,
+                    cwy + cdy,
                     match glyphs {
                         GlyphMode::Ascii => '+',
                         GlyphMode::Powerlevel10k => '\u{f140}',
+                        GlyphMode::Emoji => '🎯',
                     },
+                    Style::Aim,
                 );
             }
             plot_world(
@@ -130,8 +153,9 @@ pub fn frame(
                 hp_style,
             );
             if let Some(start) = player.charge_started {
-                let elapsed = game.tick_number.saturating_sub(start).min(40);
-                let percent = ((elapsed / 2) * 5).min(100) as i32;
+                let elapsed = game.tick_number.saturating_sub(start).min(MAX_CHARGE_TICKS);
+                let percent =
+                    ((elapsed / POWER_STEP_TICKS) as u32 * POWER_STEP_PERCENT).min(100) as i32;
                 let pw_value = (percent * 16 / 100).clamp(0, 16);
                 let (bottom, top) = level_split(pw_value);
                 plot_canvas_styled(
@@ -160,12 +184,13 @@ pub fn frame(
         let weapon = match me.weapon {
             Weapon::Bazooka => "BAZOOKA [1]",
             Weapon::Grenade => "GRENADE [2]",
+            Weapon::Meteor => "METEOR",
         };
         let state = if me.respawn_ticks > 0 {
-            format!("RESPAWN {:.1}s", me.respawn_ticks as f32 / 20.0)
+            format!("RESPAWN {:.1}s", me.respawn_ticks as f32 / TICK_RATE as f32)
         } else if let Some(start) = me.charge_started {
-            let elapsed = game.tick_number.saturating_sub(start).min(40);
-            let percent = ((elapsed / 2) * 5).min(100) as u8;
+            let elapsed = game.tick_number.saturating_sub(start).min(MAX_CHARGE_TICKS);
+            let percent = ((elapsed / POWER_STEP_TICKS) as u32 * POWER_STEP_PERCENT).min(100) as u8;
             format!("CHARGE {percent:>3}%")
         } else {
             format!(
@@ -176,21 +201,27 @@ pub fn frame(
         push_terminal_line(
             &mut out,
             &format!(
-                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+} FRAGS:{} DEATHS:{} ONLINE:{}",
+                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+}d FRAGS:{} D:{} P:{} E:{}%",
                 me.name,
                 state,
                 weapon,
                 me.vx,
-                me.aim,
+                me.aim as i32 * 90 / 8,
                 me.kills,
                 me.deaths,
-                game.players.len()
+                game.players.len(),
+                game.tiles
+                    .iter()
+                    .filter(|t| matches!(t, Tile::Earth))
+                    .count()
+                    * 100
+                    / (WIDTH * HEIGHT)
             ),
             terminal_width,
         );
     }
     out.push('+');
-    out.push_str(&"-".repeat(viewport_width));
+    out.push_str(&"-".repeat(viewport_width * cell_factor));
     out.push_str("+\x1b[K\r\n");
     for (row, overlay_row) in canvas.iter().zip(overlay.iter()) {
         out.push('|');
@@ -202,11 +233,14 @@ pub fn frame(
                 active_style = style;
             }
             out.push(*ch);
+            if cell_factor == 2 && !is_double_wide(*ch) {
+                out.push(' ');
+            }
         }
         out.push_str("\x1b[0m|\x1b[K\r\n");
     }
     out.push('+');
-    out.push_str(&"-".repeat(viewport_width));
+    out.push_str(&"-".repeat(viewport_width * cell_factor));
     out.push_str("+\x1b[K\r\n");
     push_terminal_line(
         &mut out,
@@ -388,6 +422,18 @@ fn style_for(ch: char, glyphs: GlyphMode) -> Style {
     }
 }
 
+fn is_double_wide(c: char) -> bool {
+    let code = c as u32;
+    matches!(
+        code,
+        0x1F300..=0x1F6FF
+            | 0x1F900..=0x1F9FF
+            | 0x1FA00..=0x1FAFF
+            | 0x1F100..=0x1F1FF
+            | 0x2600..=0x27BF
+    )
+}
+
 fn plot_world(canvas: &mut [Vec<char>], x: i32, y: i32, ch: char) {
     if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
         return;
@@ -567,7 +613,7 @@ mod tests {
 
         let update = incremental_frame(Some(&before), &after);
 
-        assert!(update.contains("ONLINE:2"));
+        assert!(update.contains("P:2"));
         assert!(update.contains("arrival"));
         assert!(
             !update.contains("\x1b[H"),
