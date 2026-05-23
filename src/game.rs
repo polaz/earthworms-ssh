@@ -1153,7 +1153,53 @@ impl Game {
         }
 
         self.slide_terrain();
+        self.diagonal_settle();
         self.lift_buried_players();
+    }
+
+    fn diagonal_settle(&mut self) {
+        let w = WIDTH as i32;
+        let h = HEIGHT as i32;
+        let mut xs: Vec<i32> = (0..w).collect();
+        for i in (1..xs.len()).rev() {
+            let j = self.rng.random_range(0..=i);
+            xs.swap(i, j);
+        }
+        for y in (0..h - 1).rev() {
+            for &x in &xs {
+                if self.tile(x, y) != Tile::Earth {
+                    continue;
+                }
+                if self.tile(x, y + 1) != Tile::Earth {
+                    continue;
+                }
+                let left_open = x > 0
+                    && self.tile(x - 1, y) == Tile::Air
+                    && self.tile(x - 1, y + 1) == Tile::Air;
+                let right_open = x < w - 1
+                    && self.tile(x + 1, y) == Tile::Air
+                    && self.tile(x + 1, y + 1) == Tile::Air;
+                let nx = match (left_open, right_open) {
+                    (true, true) => {
+                        if self.rng.random_bool(0.5) {
+                            x - 1
+                        } else {
+                            x + 1
+                        }
+                    }
+                    (true, false) => x - 1,
+                    (false, true) => x + 1,
+                    (false, false) => continue,
+                };
+                let src_idx = y as usize * WIDTH + x as usize;
+                let prev_cohesion = self.cohesion[src_idx].max(1);
+                self.set_tile(x, y, Tile::Air);
+                self.set_tile(nx, y + 1, Tile::Earth);
+                let dst = (y + 1) as usize * WIDTH + nx as usize;
+                self.cohesion[dst] = prev_cohesion;
+                self.hang[dst] = 0;
+            }
+        }
     }
 
     fn compress_cavities(&mut self) {
