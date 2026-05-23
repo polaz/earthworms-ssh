@@ -176,7 +176,7 @@ pub fn frame(
         push_terminal_line(
             &mut out,
             &format!(
-                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+} K:{} D:{} P:{}",
+                "WORMS//SSH {} {} {} VX:{:+.1} AIM:{:+} FRAGS:{} DEATHS:{} ONLINE:{}",
                 me.name,
                 state,
                 weapon,
@@ -214,7 +214,7 @@ pub fn frame(
         terminal_width,
     );
     for index in 0..feed_lines {
-        if let Some(item) = game.feed.get(index) {
+        if let Some((_, item)) = game.feed.get(index) {
             push_terminal_line(&mut out, &format!("> {item}"), terminal_width);
         } else {
             push_terminal_line(&mut out, "", terminal_width);
@@ -567,7 +567,7 @@ mod tests {
 
         let update = incremental_frame(Some(&before), &after);
 
-        assert!(update.contains("P:2"));
+        assert!(update.contains("ONLINE:2"));
         assert!(update.contains("arrival tunneled into the arena"));
         assert!(
             !update.contains("\x1b[H"),

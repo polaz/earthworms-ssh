@@ -32,6 +32,34 @@ const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
 const TALUS: i32 = 2;
 const SLIDE_PROBABILITY: f64 = 0.5;
 pub const MAX_HEALTH: i16 = 1000;
+const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 10;
+const FEED_TTL_TICKS: u64 = TICK_RATE * 8;
+
+const FRAG_VERBS: &[&str] = &[
+    "vaporized",
+    "deleted",
+    "yeeted",
+    "atomized",
+    "obliterated",
+    "rocket-tagged",
+    "sent to the shadow realm",
+    "introduced to gravity",
+    "uninstalled",
+    "tactically removed",
+    "redistributed across the map",
+    "converted to particle effects",
+];
+
+const SUICIDE_VERBS: &[&str] = &[
+    "cratered themselves",
+    "found out gravity is real",
+    "forgot they were holding it",
+    "skipped the middleman",
+    "rage-quit via grenade",
+    "ate their own rocket",
+    "self-recycled",
+    "demonstrated the blast radius",
+];
 const MAX_BLAST_DAMAGE: f32 = 800.0;
 const MIN_BLAST_DAMAGE: i16 = 40;
 
@@ -114,6 +142,7 @@ pub struct Player {
     movement_started: u64,
     last_direction: i8,
     last_input_tick: u64,
+    regen_carry: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +181,7 @@ pub struct Game {
     pub projectiles: Vec<Projectile>,
     pub blasts: Vec<Blast>,
     pub tick_number: u64,
-    pub feed: VecDeque<String>,
+    pub feed: VecDeque<(u64, String)>,
     rng: SmallRng,
     clients: HashMap<PlayerId, Client>,
     next_growth_tick: u64,
@@ -229,6 +258,8 @@ impl Game {
 
     pub fn tick(&mut self) {
         self.tick_number += 1;
+        let cutoff = self.tick_number.saturating_sub(FEED_TTL_TICKS);
+        self.feed.retain(|(t, _)| *t >= cutoff);
         self.update_players();
         self.update_projectiles();
         self.settle_terrain();
@@ -417,6 +448,14 @@ impl Game {
                     continue;
                 }
                 player.fire_cooldown = player.fire_cooldown.saturating_sub(1);
+                if player.health > 0 && player.health < MAX_HEALTH {
+                    player.regen_carry += MAX_HEALTH as i32;
+                    let step = (player.regen_carry / HEALTH_REGEN_TICKS as i32) as i16;
+                    if step > 0 {
+                        player.health = (player.health + step).min(MAX_HEALTH);
+                        player.regen_carry -= step as i32 * HEALTH_REGEN_TICKS as i32;
+                    }
+                }
                 player.vx = (player.vx + player.move_impulse + slide).clamp(-MAX_RUN, MAX_RUN);
                 let idle =
                     self.tick_number.saturating_sub(player.last_input_tick) > FRICTION_GRACE_TICKS;
@@ -581,10 +620,12 @@ impl Game {
                 if let Some(killer) = self.players.get_mut(&owner) {
                     killer.kills += 1;
                     let killer_name = killer.name.clone();
-                    self.say(format!("{killer_name} vaporized {name}"));
+                    let verb = FRAG_VERBS[self.rng.random_range(0..FRAG_VERBS.len())];
+                    self.say(format!("{killer_name} {verb} {name}"));
                 }
             } else {
-                self.say(format!("{name} cratered themselves"));
+                let verb = SUICIDE_VERBS[self.rng.random_range(0..SUICIDE_VERBS.len())];
+                self.say(format!("{name} {verb}"));
             }
         }
     }
@@ -766,7 +807,7 @@ impl Game {
     }
 
     fn say(&mut self, message: String) {
-        self.feed.push_front(message);
+        self.feed.push_front((self.tick_number, message));
         self.feed.truncate(4);
     }
 }
@@ -796,6 +837,7 @@ impl Player {
             movement_started: 0,
             last_direction: 0,
             last_input_tick: 0,
+            regen_carry: 0,
         }
     }
 
@@ -806,6 +848,7 @@ impl Player {
         self.respawn_ticks = 0;
         self.vx = 0.0;
         self.vy = 0.0;
+        self.regen_carry = 0;
     }
 
     fn pulse_move(&mut self, direction: i8, tick: u64) {
