@@ -24,9 +24,9 @@ const SLIDE_ACCEL: f32 = 0.12 * SCALE * A_SCALE;
 const SLIDE_LOOKAHEAD: i32 = 2;
 const SLIDE_DROP_THRESHOLD: i32 = 4;
 const FIRE_RELEASE_SILENCE: u64 = TICK_RATE / 4;
-const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
-const POWER_STEP_TICKS: u64 = TICK_RATE / 10;
-const POWER_STEP_PERCENT: u32 = 5;
+pub const MAX_CHARGE_TICKS: u64 = TICK_RATE * 2;
+pub const POWER_STEP_TICKS: u64 = TICK_RATE / 10;
+pub const POWER_STEP_PERCENT: u32 = 5;
 const MAX_PROJECTILE_SPEED: f32 = 9.5 * V_SCALE;
 const TERRAIN_CAP: usize = WIDTH * HEIGHT / 2;
 const MOVE_SUBSTEP: f32 = 0.9;
@@ -35,7 +35,7 @@ const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
 const TALUS: i32 = 2;
 const SLIDE_BASE_PROBABILITY: f64 = 0.55;
 const GROWTH_REGION_FRACTION: i32 = 8;
-const GROWTH_HEIGHT_CAP_PCT: i32 = 30;
+const GROWTH_HEIGHT_CAP_PCT: i32 = 70;
 const GROWTH_MIN_BURST: usize = 3;
 const GROWTH_MAX_BURST: usize = 18;
 pub const MAX_HEALTH: i16 = 1000;
@@ -1066,7 +1066,7 @@ impl Player {
             owner: self.id,
             weapon: self.weapon,
             vx: self.facing as f32 * speed * cos,
-            vy: speed * sin / Y_ASPECT,
+            vy: speed * sin,
             fuse: match self.weapon {
                 Weapon::Bazooka => 200,
                 Weapon::Grenade => 240,

@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
 use crate::game::{
-    ColorDepth, Game, GlyphMode, HEIGHT, MAX_HEALTH, PlayerId, Tile, WIDTH, WORLD_SCALE, Weapon,
-    Y_ASPECT,
+    ColorDepth, Game, GlyphMode, HEIGHT, MAX_CHARGE_TICKS, MAX_HEALTH, POWER_STEP_PERCENT,
+    POWER_STEP_TICKS, PlayerId, TICK_RATE, Tile, WIDTH, WORLD_SCALE, Weapon, Y_ASPECT,
 };
 
 const MAX_VIEWPORT_WIDTH: usize = 300;
@@ -137,8 +137,9 @@ pub fn frame(
                 hp_style,
             );
             if let Some(start) = player.charge_started {
-                let elapsed = game.tick_number.saturating_sub(start).min(40);
-                let percent = ((elapsed / 2) * 5).min(100) as i32;
+                let elapsed = game.tick_number.saturating_sub(start).min(MAX_CHARGE_TICKS);
+                let percent =
+                    ((elapsed / POWER_STEP_TICKS) as u32 * POWER_STEP_PERCENT).min(100) as i32;
                 let pw_value = (percent * 16 / 100).clamp(0, 16);
                 let (bottom, top) = level_split(pw_value);
                 plot_canvas_styled(
@@ -169,10 +170,10 @@ pub fn frame(
             Weapon::Grenade => "GRENADE [2]",
         };
         let state = if me.respawn_ticks > 0 {
-            format!("RESPAWN {:.1}s", me.respawn_ticks as f32 / 20.0)
+            format!("RESPAWN {:.1}s", me.respawn_ticks as f32 / TICK_RATE as f32)
         } else if let Some(start) = me.charge_started {
-            let elapsed = game.tick_number.saturating_sub(start).min(40);
-            let percent = ((elapsed / 2) * 5).min(100) as u8;
+            let elapsed = game.tick_number.saturating_sub(start).min(MAX_CHARGE_TICKS);
+            let percent = ((elapsed / POWER_STEP_TICKS) as u32 * POWER_STEP_PERCENT).min(100) as u8;
             format!("CHARGE {percent:>3}%")
         } else {
             format!(
