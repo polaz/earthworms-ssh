@@ -370,6 +370,9 @@ impl Game {
         self.update_projectiles();
         self.flush_kills();
         self.settle_terrain();
+        if self.tick_number.is_multiple_of(3) {
+            self.compress_cavities();
+        }
         self.process_growth_timers();
         if self.tick_number >= self.next_meteor_tick {
             self.spawn_meteor();
@@ -1040,6 +1043,104 @@ impl Game {
             }
         }
 
+        let mut a_cluster_id = vec![0u32; WIDTH * HEIGHT];
+        let mut a_next: u32 = 1;
+        for sy in (0..HEIGHT as i32).rev() {
+            for sx in 0..WIDTH as i32 {
+                let sidx = sy as usize * WIDTH + sx as usize;
+                if !anchored[sidx] || a_cluster_id[sidx] != 0 {
+                    continue;
+                }
+                let cid = a_next;
+                a_next += 1;
+                a_cluster_id[sidx] = cid;
+                let mut local: VecDeque<(i32, i32)> = VecDeque::new();
+                local.push_back((sx, sy));
+                while let Some((x, y)) = local.pop_front() {
+                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                        if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                            continue;
+                        }
+                        let ni = ny as usize * WIDTH + nx as usize;
+                        if !anchored[ni] || a_cluster_id[ni] != 0 {
+                            continue;
+                        }
+                        a_cluster_id[ni] = cid;
+                        local.push_back((nx, ny));
+                    }
+                }
+            }
+        }
+
+        let n_anc_clusters = a_next as usize;
+        if n_anc_clusters > 1 {
+            let mut row_w = vec![0u32; n_anc_clusters * HEIGHT];
+            let mut row_x_sum = vec![0u64; n_anc_clusters * HEIGHT];
+            let mut row_x_min = vec![u32::MAX; n_anc_clusters * HEIGHT];
+            let mut row_x_max = vec![0u32; n_anc_clusters * HEIGHT];
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let idx = y * WIDTH + x;
+                    let cid = a_cluster_id[idx] as usize;
+                    if cid > 0 {
+                        let k = cid * HEIGHT + y;
+                        row_w[k] += 1;
+                        row_x_sum[k] += x as u64;
+                        if (x as u32) < row_x_min[k] {
+                            row_x_min[k] = x as u32;
+                        }
+                        if (x as u32) > row_x_max[k] {
+                            row_x_max[k] = x as u32;
+                        }
+                    }
+                }
+            }
+            const VERT_RATIO: u32 = 25;
+            const TORQUE_FACTOR_NUM: u64 = 14;
+            const TORQUE_FACTOR_DEN: u64 = 10;
+            let mut break_y: Vec<Option<usize>> = vec![None; n_anc_clusters];
+            for (cid, slot) in break_y.iter_mut().enumerate().skip(1) {
+                let mut mass_above: u64 = 0;
+                let mut x_sum_above: u64 = 0;
+                for y in 0..HEIGHT {
+                    let k = cid * HEIGHT + y;
+                    let w = row_w[k] as u64;
+                    if w == 0 {
+                        continue;
+                    }
+                    if let (Some(support_centroid_10), Some(load_centroid_10)) = (
+                        (row_x_sum[k] * 10).checked_div(w),
+                        (x_sum_above * 10).checked_div(mass_above),
+                    ) {
+                        let offset_10 = support_centroid_10.abs_diff(load_centroid_10);
+                        let support_span = (row_x_max[k] - row_x_min[k] + 1) as u64;
+                        let torque_limit_10 =
+                            support_span * 10 * TORQUE_FACTOR_NUM / (2 * TORQUE_FACTOR_DEN);
+                        let vertical_fail = w * (VERT_RATIO as u64) < mass_above;
+                        let torque_fail = offset_10 > torque_limit_10;
+                        if vertical_fail || torque_fail {
+                            *slot = Some(y);
+                            break;
+                        }
+                    }
+                    mass_above += w;
+                    x_sum_above += row_x_sum[k];
+                }
+            }
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let idx = y * WIDTH + x;
+                    let cid = a_cluster_id[idx] as usize;
+                    if cid > 0
+                        && let Some(yb) = break_y[cid]
+                        && y < yb
+                    {
+                        anchored[idx] = false;
+                    }
+                }
+            }
+        }
+
         let mut cluster_id = vec![0u32; WIDTH * HEIGHT];
         let mut cluster_size: Vec<u32> = vec![0];
         let mut next_id: u32 = 1;
@@ -1127,6 +1228,70 @@ impl Game {
 
         self.slide_terrain();
         self.lift_buried_players();
+    }
+
+    fn compress_cavities(&mut self) {
+        let mut sky_air = vec![false; WIDTH * HEIGHT];
+        let mut q: VecDeque<(i32, i32)> = VecDeque::new();
+        for x in 0..WIDTH as i32 {
+            if self.tile(x, 0) == Tile::Air {
+                sky_air[x as usize] = true;
+                q.push_back((x, 0));
+            }
+        }
+        while let Some((x, y)) = q.pop_front() {
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                    continue;
+                }
+                let ni = ny as usize * WIDTH + nx as usize;
+                if !sky_air[ni] && self.tile(nx, ny) == Tile::Air {
+                    sky_air[ni] = true;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+
+        const COMPRESSION_THRESHOLD: u32 = 10;
+        const COMPRESSION_PROB: f64 = 0.25;
+        let mut ops: Vec<(i32, i32, i32)> = Vec::new();
+        for y in 1..HEIGHT as i32 {
+            for x in 0..WIDTH as i32 {
+                let idx = y as usize * WIDTH + x as usize;
+                if sky_air[idx] {
+                    continue;
+                }
+                if self.tile(x, y) != Tile::Air {
+                    continue;
+                }
+                if self.tile(x, y - 1) != Tile::Earth {
+                    continue;
+                }
+                let mut pressure: u32 = 0;
+                let mut top_of_column = y - 1;
+                let mut ay = y - 1;
+                while ay >= 0 && self.tile(x, ay) == Tile::Earth {
+                    pressure += 1;
+                    top_of_column = ay;
+                    ay -= 1;
+                }
+                if pressure < COMPRESSION_THRESHOLD {
+                    continue;
+                }
+                if !self.rng.random_bool(COMPRESSION_PROB) {
+                    continue;
+                }
+                ops.push((x, top_of_column, y));
+            }
+        }
+        for (x, top_y, cavity_y) in ops {
+            if self.tile(x, top_y) != Tile::Earth || self.tile(x, cavity_y) != Tile::Air {
+                continue;
+            }
+            self.set_tile(x, top_y, Tile::Air);
+            self.set_tile(x, cavity_y, Tile::Earth);
+            self.seed_cohesion(x, cavity_y);
+        }
     }
 
     fn slide_terrain(&mut self) {
