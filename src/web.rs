@@ -1,9 +1,11 @@
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use axum::{
@@ -17,12 +19,16 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::{
+    Mutex,
+    mpsc::{self, UnboundedSender},
+};
 use tracing::info;
 
-use crate::game::{ColorDepth, Event, GlyphMode};
+use crate::game::{ColorDepth, Event, GlyphMode, TICK_RATE};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
+const PULSE_MS: u64 = 1000 / TICK_RATE;
 
 #[derive(Clone)]
 struct AppState {
@@ -37,9 +43,18 @@ struct WsQuery {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(untagged)]
 enum ClientMsg {
-    Resize { cols: u32, rows: u32 },
+    Down { down: String },
+    Up { up: String },
+    Press { press: String },
+    Resize { resize: ResizeMsg },
+}
+
+#[derive(Deserialize)]
+struct ResizeMsg {
+    cols: u32,
+    rows: u32,
 }
 
 pub async fn run(
@@ -99,6 +114,33 @@ async fn handle_socket(mut socket: WebSocket, name: String, q: WsQuery, state: A
         return;
     }
 
+    let held: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let pulse_held = held.clone();
+    let pulse_events = state.events.clone();
+    let pulse = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(PULSE_MS));
+        loop {
+            tick.tick().await;
+            let snapshot: Vec<String> = {
+                let guard = pulse_held.lock().await;
+                guard.iter().cloned().collect()
+            };
+            if snapshot.is_empty() {
+                continue;
+            }
+            let mut bytes = Vec::with_capacity(snapshot.iter().map(|s| s.len()).sum());
+            for key in snapshot {
+                bytes.extend_from_slice(key.as_bytes());
+            }
+            if pulse_events
+                .send(Event::Input { id, input: bytes })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
     loop {
         tokio::select! {
             biased;
@@ -115,12 +157,28 @@ async fn handle_socket(mut socket: WebSocket, name: String, q: WsQuery, state: A
             maybe_msg = socket.recv() => {
                 match maybe_msg {
                     Some(Ok(Message::Text(t))) => {
-                        if let Ok(ClientMsg::Resize { cols, rows }) = serde_json::from_str::<ClientMsg>(&t) {
-                            let _ = state.events.send(Event::Resize {
-                                id,
-                                columns: cols.clamp(20, 400),
-                                rows: rows.clamp(8, 120),
-                            });
+                        if let Ok(msg) = serde_json::from_str::<ClientMsg>(&t) {
+                            match msg {
+                                ClientMsg::Down { down } => {
+                                    held.lock().await.insert(down);
+                                }
+                                ClientMsg::Up { up } => {
+                                    held.lock().await.remove(&up);
+                                }
+                                ClientMsg::Press { press } => {
+                                    let _ = state.events.send(Event::Input {
+                                        id,
+                                        input: press.into_bytes(),
+                                    });
+                                }
+                                ClientMsg::Resize { resize } => {
+                                    let _ = state.events.send(Event::Resize {
+                                        id,
+                                        columns: resize.cols.clamp(20, 400),
+                                        rows: resize.rows.clamp(8, 120),
+                                    });
+                                }
+                            }
                         } else {
                             let _ = state.events.send(Event::Input { id, input: t.into_bytes() });
                         }
@@ -134,5 +192,6 @@ async fn handle_socket(mut socket: WebSocket, name: String, q: WsQuery, state: A
             }
         }
     }
+    pulse.abort();
     let _ = state.events.send(Event::Leave(id));
 }

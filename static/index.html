@@ -74,23 +74,17 @@
     [" ", " "], ["1", "1"], ["2", "2"],
   ]);
 
-  const pressed = new Set();
-  let tickId = null;
-  const startTick = () => {
-    if (tickId) return;
-    tickId = setInterval(() => {
-      for (const key of pressed) send(repeat.get(key));
-    }, 50);
-  };
-  const stopTick = () => {
-    if (tickId) { clearInterval(tickId); tickId = null; }
+  const pressed = new Map();
+  const stopAll = () => {
+    for (const bytes of pressed.values()) sendJson({ up: bytes });
     pressed.clear();
   };
+  const sendJson = (obj) => send(JSON.stringify(obj));
 
   window.addEventListener("keydown", (e) => {
     if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
       e.preventDefault();
-      send("\x03");
+      sendJson({ press: "\x03" });
       ws.close();
       return;
     }
@@ -98,22 +92,25 @@
     if (repeat.has(e.key)) {
       e.preventDefault();
       if (!pressed.has(e.key)) {
-        pressed.add(e.key);
-        send(repeat.get(e.key));
-        startTick();
+        const bytes = repeat.get(e.key);
+        pressed.set(e.key, bytes);
+        sendJson({ down: bytes });
       }
     } else if (oneShot.has(e.key)) {
       e.preventDefault();
-      send(oneShot.get(e.key));
+      sendJson({ press: oneShot.get(e.key) });
     }
-  });
+  }, true);
+
   window.addEventListener("keyup", (e) => {
-    if (pressed.delete(e.key) && pressed.size === 0) {
-      clearInterval(tickId);
-      tickId = null;
+    const bytes = pressed.get(e.key);
+    if (bytes !== undefined) {
+      pressed.delete(e.key);
+      sendJson({ up: bytes });
     }
-  });
-  window.addEventListener("blur", stopTick);
+  }, true);
+
+  window.addEventListener("blur", stopAll);
 
   let pending = null;
   const flushResize = () => {
