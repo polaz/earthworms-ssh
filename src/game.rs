@@ -36,7 +36,6 @@ const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
 const TALUS: i32 = 2;
 const SLIDE_BASE_PROBABILITY: f64 = 0.55;
 const GROWTH_HEIGHT_CAP_PCT: i32 = 70;
-const GROWTH_MIN_BURST: usize = 6;
 pub const MAX_HEALTH: i16 = 1000;
 const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
 pub const Y_ASPECT: f32 = 1.7;
@@ -261,6 +260,15 @@ struct Client {
     glyphs: GlyphMode,
 }
 
+#[derive(Clone, Copy)]
+struct GrowthTimer {
+    cx: i32,
+    radius: i32,
+    cells_left: u16,
+    cells_per_tick: u8,
+    cooldown_left: u16,
+}
+
 pub struct Game {
     pub tiles: Vec<Tile>,
     pub players: HashMap<PlayerId, Player>,
@@ -270,7 +278,8 @@ pub struct Game {
     pub feed: VecDeque<(u64, String)>,
     rng: SmallRng,
     clients: HashMap<PlayerId, Client>,
-    next_growth_tick: u64,
+    growth_timers: Vec<GrowthTimer>,
+    growth_disabled: bool,
     next_meteor_tick: u64,
     hang: Vec<u16>,
     cohesion: Vec<u8>,
@@ -288,7 +297,8 @@ impl Game {
             feed: VecDeque::new(),
             rng: SmallRng::seed_from_u64(seed),
             clients: HashMap::new(),
-            next_growth_tick: 40,
+            growth_timers: Vec::new(),
+            growth_disabled: false,
             next_meteor_tick: METEOR_INTERVAL_TICKS,
             hang: vec![0; WIDTH * HEIGHT],
             cohesion: vec![0; WIDTH * HEIGHT],
@@ -357,11 +367,7 @@ impl Game {
         self.update_projectiles();
         self.flush_kills();
         self.settle_terrain();
-        if self.tick_number >= self.next_growth_tick {
-            self.grow_terrain();
-            let delay = TICK_RATE * 3;
-            self.next_growth_tick = self.tick_number + delay;
-        }
+        self.process_growth_timers();
         if self.tick_number >= self.next_meteor_tick {
             self.spawn_meteor();
             self.next_meteor_tick = self.tick_number + METEOR_INTERVAL_TICKS;
@@ -825,17 +831,61 @@ impl Game {
         self.say("a meteor screams down from the sky".into());
     }
 
-    fn grow_terrain(&mut self) {
-        let earth = self.earth_count();
-        if earth >= TERRAIN_CAP {
+    fn process_growth_timers(&mut self) {
+        if self.growth_disabled {
+            self.growth_timers.clear();
             return;
         }
-        let deficit = (TERRAIN_CAP - earth) as f32 / TERRAIN_CAP as f32;
-        let target_per_event = (WIDTH * HEIGHT) as f32 / 40.0;
-        let burst = ((deficit * target_per_event) as usize)
-            .max(GROWTH_MIN_BURST)
-            .min(TERRAIN_CAP - earth);
+        let earth = self.earth_count();
+        let abs_fill = earth as f32 / (WIDTH * HEIGHT) as f32;
+        let desired = if abs_fill >= 0.55 || earth >= TERRAIN_CAP {
+            0
+        } else {
+            (20.0 * (1.0 - abs_fill * 2.0)).round().max(1.0) as usize
+        };
+        let cluster_size = (200.0 - 300.0 * abs_fill).clamp(50.0, 200.0) as u16;
+        let cooldown_secs = 3.0 * (20.0_f32 / 3.0).powf((abs_fill / 0.55).clamp(0.0, 1.0));
+        let cooldown_ticks = (cooldown_secs * TICK_RATE as f32) as u16;
+        let pour_ticks = TICK_RATE as u16;
 
+        while self.growth_timers.len() < desired {
+            let phase = self.rng.random_range(0..=cooldown_ticks);
+            let mut drip = self.new_drip(cluster_size, pour_ticks);
+            drip.cells_left = 0;
+            drip.cooldown_left = phase;
+            self.growth_timers.push(drip);
+        }
+        while self.growth_timers.len() > desired {
+            self.growth_timers.pop();
+        }
+
+        for i in 0..self.growth_timers.len() {
+            if self.growth_timers[i].cells_left > 0 {
+                let cx = self.growth_timers[i].cx;
+                let radius = self.growth_timers[i].radius;
+                let per_tick = self.growth_timers[i].cells_per_tick.max(1);
+                for _ in 0..per_tick {
+                    if self.growth_timers[i].cells_left == 0 {
+                        break;
+                    }
+                    if self.drip_one_cell(cx, radius) {
+                        self.growth_timers[i].cells_left -= 1;
+                    } else {
+                        self.growth_timers[i].cells_left = 0;
+                        break;
+                    }
+                }
+            } else if self.growth_timers[i].cooldown_left > 0 {
+                self.growth_timers[i].cooldown_left -= 1;
+            } else {
+                let mut drip = self.new_drip(cluster_size, pour_ticks);
+                drip.cooldown_left = cooldown_ticks;
+                self.growth_timers[i] = drip;
+            }
+        }
+    }
+
+    fn new_drip(&mut self, cluster_size: u16, pour_ticks: u16) -> GrowthTimer {
         let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
         let mut candidates: Vec<i32> = Vec::new();
         for x in 1..(WIDTH as i32 - 1) {
@@ -846,76 +896,53 @@ impl Game {
                 candidates.push(x);
             }
         }
-        if candidates.is_empty() {
-            return;
-        }
-
-        let mut placed = 0;
-        let mut attempts = 0;
-        while placed < burst && !candidates.is_empty() && attempts < burst * 4 {
-            attempts += 1;
-            let idx = self.rng.random_range(0..candidates.len());
-            let cx = candidates[idx];
-            let blob_remaining = (burst - placed).min(16);
-            if blob_remaining < 3 {
-                let added = self.place_cluster(cx, max_top_y, blob_remaining);
-                placed += added;
-                let _ = placed;
-                if added == 0 {
-                    candidates.swap_remove(idx);
-                }
-                break;
-            }
-            let target = self.rng.random_range(3..=blob_remaining);
-            let added = self.place_cluster(cx, max_top_y, target);
-            placed += added;
-            if added == 0 {
-                candidates.swap_remove(idx);
-            }
-            self.lift_buried_players();
+        let cx = if candidates.is_empty() {
+            self.rng.random_range(1..(WIDTH as i32 - 1))
+        } else {
+            candidates[self.rng.random_range(0..candidates.len())]
+        };
+        let cells_per_tick = cluster_size.div_ceil(pour_ticks.max(1)).clamp(1, 255) as u8;
+        GrowthTimer {
+            cx,
+            radius: 5,
+            cells_left: cluster_size,
+            cells_per_tick,
+            cooldown_left: 0,
         }
     }
 
-    fn place_cluster(&mut self, cx: i32, max_top_y: i32, budget: usize) -> usize {
-        if budget == 0 {
-            return 0;
+    fn drip_one_cell(&mut self, cx: i32, radius: i32) -> bool {
+        if self.earth_count() >= TERRAIN_CAP {
+            return false;
         }
-        let radius = match budget {
-            0..=3 => 1,
-            4..=8 => 2,
-            _ => 3,
-        };
-        let mut placed = 0;
-        for dx in -radius..=radius {
+        let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
+        for _ in 0..8 {
+            let dx = self.rng.random_range(-radius..=radius);
             let nx = cx + dx;
-            if nx <= 0 || nx >= WIDTH as i32 - 1 {
+            if nx < 1 || nx >= WIDTH as i32 - 1 {
                 continue;
             }
-            let col_h = (radius - dx.abs() + 1).max(1);
             let Some((_, top)) = self.supported_growth_site(nx) else {
                 continue;
             };
             if top < max_top_y {
                 continue;
             }
-            for k in 0..col_h {
-                if placed >= budget {
-                    return placed;
-                }
-                let y = top - k;
-                if y < 0 {
-                    break;
-                }
-                if self.tile(nx, y) == Tile::Earth {
-                    continue;
-                }
-                self.set_tile(nx, y, Tile::Earth);
-                self.seed_cohesion(nx, y);
-                self.hang[y as usize * WIDTH + nx as usize] = 0;
-                placed += 1;
-            }
+            self.set_tile(nx, top, Tile::Earth);
+            self.seed_cohesion(nx, top);
+            self.hang[top as usize * WIDTH + nx as usize] = 0;
+            return true;
         }
-        placed
+        false
+    }
+
+    #[cfg(test)]
+    fn grow_terrain(&mut self) {
+        let drip = self.new_drip(60, 1);
+        for _ in 0..60 {
+            self.drip_one_cell(drip.cx, drip.radius);
+        }
+        self.lift_buried_players();
     }
 
     fn supported_growth_site(&self, x: i32) -> Option<(i32, i32)> {
@@ -969,18 +996,18 @@ impl Game {
             if self.tile(x, y) != Tile::Earth {
                 continue;
             }
-            let mut ny = y;
-            while ny + 1 < HEIGHT as i32 && self.tile(x, ny + 1) == Tile::Air {
-                ny += 1;
+            if y + 1 >= HEIGHT as i32 {
+                continue;
             }
-            if ny != y {
-                let prev_cohesion = self.cohesion[y as usize * WIDTH + x as usize].max(1);
-                self.set_tile(x, y, Tile::Air);
-                self.set_tile(x, ny, Tile::Earth);
-                let dst = ny as usize * WIDTH + x as usize;
-                self.cohesion[dst] = prev_cohesion;
-                self.hang[dst] = 0;
+            if self.tile(x, y + 1) != Tile::Air {
+                continue;
             }
+            let prev_cohesion = self.cohesion[y as usize * WIDTH + x as usize].max(1);
+            self.set_tile(x, y, Tile::Air);
+            self.set_tile(x, y + 1, Tile::Earth);
+            let dst = (y + 1) as usize * WIDTH + x as usize;
+            self.cohesion[dst] = prev_cohesion;
+            self.hang[dst] = 0;
         }
 
         self.slide_terrain();
@@ -1379,7 +1406,7 @@ mod tests {
         game.tiles.fill(Tile::Air);
         game.set_tile(44, 4, Tile::Earth);
         game.set_tile(44, 9, Tile::Earth);
-        game.next_growth_tick = u64::MAX;
+        game.growth_disabled = true;
 
         for _ in 0..(HEIGHT as i32 * 2) {
             game.tick();
