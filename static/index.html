@@ -10,7 +10,7 @@
   #wrap { display: flex; flex-direction: column; height: 100vh; }
   #bar { padding: 6px 10px; font-size: 12px; background: #111; border-bottom: 1px solid #222; }
   #term { flex: 1; padding: 4px; }
-  a { color: #6cf; }
+  .xterm .xterm-cursor-layer { display: none; }
 </style>
 </head>
 <body>
@@ -27,11 +27,13 @@
 
   const term = new Terminal({
     cursorBlink: false,
-    disableStdin: false,
+    cursorStyle: "bar",
+    cursorInactiveStyle: "none",
+    disableStdin: true,
     convertEol: false,
     fontFamily: "ui-monospace, Menlo, monospace",
     fontSize: 14,
-    theme: { background: "#000", foreground: "#ccc" },
+    theme: { background: "#000", foreground: "#ccc", cursor: "rgba(0,0,0,0)", cursorAccent: "rgba(0,0,0,0)" },
     allowProposedApi: true,
   });
   const fit = new FitAddon.FitAddon();
@@ -46,30 +48,83 @@
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => { status.textContent = `connected as ${name}`; };
-  ws.onclose = () => { status.textContent = "disconnected"; };
+  ws.onclose = () => { status.textContent = "disconnected"; stopTick(); };
   ws.onerror = () => { status.textContent = "error"; };
   ws.onmessage = (e) => {
     if (typeof e.data === "string") term.write(e.data);
     else term.write(new Uint8Array(e.data));
   };
 
-  term.onData((d) => { if (ws.readyState === 1) ws.send(d); });
+  const send = (data) => { if (ws.readyState === 1) ws.send(data); };
+
+  // Keys whose effect should pulse every tick while held. Server uses
+  // accumulated tick count, not OS key-repeat, so do not wait for the OS to
+  // start repeating after its 500ms delay.
+  const repeat = new Map([
+    ["a", "a"], ["A", "a"], ["d", "d"], ["D", "d"],
+    ["w", "w"], ["W", "w"], ["s", "s"], ["S", "s"],
+    ["j", "j"], ["J", "j"], ["l", "l"], ["L", "l"],
+    ["ArrowLeft", "\x1b[D"], ["ArrowRight", "\x1b[C"],
+    ["ArrowUp", "\x1b[A"], ["ArrowDown", "\x1b[B"],
+    ["Enter", "\r"],
+  ]);
+  // One-shot keys: a single byte per press, no repeat regardless of how long
+  // the user holds them.
+  const oneShot = new Map([
+    [" ", " "], ["1", "1"], ["2", "2"],
+  ]);
+
+  const pressed = new Set();
+  let tickId = null;
+  const startTick = () => {
+    if (tickId) return;
+    tickId = setInterval(() => {
+      for (const key of pressed) send(repeat.get(key));
+    }, 50);
+  };
+  const stopTick = () => {
+    if (tickId) { clearInterval(tickId); tickId = null; }
+    pressed.clear();
+  };
+
+  window.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
+      e.preventDefault();
+      send("\x03");
+      ws.close();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (repeat.has(e.key)) {
+      e.preventDefault();
+      if (!pressed.has(e.key)) {
+        pressed.add(e.key);
+        send(repeat.get(e.key));
+        startTick();
+      }
+    } else if (oneShot.has(e.key)) {
+      e.preventDefault();
+      send(oneShot.get(e.key));
+    }
+  });
+  window.addEventListener("keyup", (e) => {
+    if (pressed.delete(e.key) && pressed.size === 0) {
+      clearInterval(tickId);
+      tickId = null;
+    }
+  });
+  window.addEventListener("blur", stopTick);
 
   let pending = null;
   const flushResize = () => {
     pending = null;
     fit.fit();
-    if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
-    }
+    send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
   };
   window.addEventListener("resize", () => {
     if (pending) clearTimeout(pending);
     pending = setTimeout(flushResize, 80);
   });
-
-  document.getElementById("term").addEventListener("click", () => term.focus());
-  term.focus();
 })();
 </script>
 </body>
