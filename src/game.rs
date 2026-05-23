@@ -713,9 +713,9 @@ impl Game {
         self.projectiles = remaining;
         for (x, y, owner, weapon) in explosions {
             let (radius, max_dmg) = match weapon {
-                Weapon::Bazooka => (4 * WORLD_SCALE as i32, 800.0),
-                Weapon::Grenade => (8 * WORLD_SCALE as i32, 1200.0),
-                Weapon::Meteor => (6 * WORLD_SCALE as i32, 1500.0),
+                Weapon::Bazooka => (5 * WORLD_SCALE as i32, 1100.0),
+                Weapon::Grenade => (9 * WORLD_SCALE as i32, 1500.0),
+                Weapon::Meteor => (7 * WORLD_SCALE as i32, 1900.0),
             };
             self.explode(x.round() as i32, y.round() as i32, radius, max_dmg, owner);
         }
@@ -828,7 +828,7 @@ impl Game {
 
     fn spawn_meteor(&mut self) {
         let x = self.rng.random_range(40..(WIDTH as i32 - 40)) as f32;
-        let speed: f32 = self.rng.random_range(1.6..=2.2);
+        let speed: f32 = self.rng.random_range(1.2..=1.6);
         let angle_deg: f32 = self.rng.random_range(-35.0..=35.0);
         let angle = angle_deg.to_radians();
         let vx = speed * angle.sin();

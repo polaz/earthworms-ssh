@@ -52,8 +52,13 @@ pub fn frame(
         let py = projectile.y.round() as i32;
         plot_world(&mut canvas, px, py, glyph);
         if projectile.glyph == '@' {
-            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                plot_world(&mut canvas, px + dx, py + dy, glyph);
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    plot_world(&mut canvas, px + dx, py + dy, glyph);
+                }
             }
         }
     }
