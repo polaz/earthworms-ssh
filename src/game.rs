@@ -827,9 +827,12 @@ impl Game {
     }
 
     fn spawn_meteor(&mut self) {
-        let x = self.rng.random_range(20..(WIDTH as i32 - 20)) as f32;
-        let vx = self.rng.random_range(-0.4..=0.4);
-        let vy = self.rng.random_range(2.5..=4.0);
+        let x = self.rng.random_range(40..(WIDTH as i32 - 40)) as f32;
+        let speed: f32 = self.rng.random_range(1.6..=2.2);
+        let angle_deg: f32 = self.rng.random_range(-35.0..=35.0);
+        let angle = angle_deg.to_radians();
+        let vx = speed * angle.sin();
+        let vy = speed * angle.cos();
         self.projectiles.push(Projectile {
             x,
             y: -SCALE,
@@ -838,7 +841,7 @@ impl Game {
             weapon: Weapon::Meteor,
             vx,
             vy,
-            fuse: TICK_RATE as u16 * 6,
+            fuse: TICK_RATE as u16 * 10,
         });
         self.say("a meteor screams down from the sky".into());
     }
@@ -1021,151 +1024,99 @@ impl Game {
     }
 
     fn settle_terrain(&mut self) {
+        const FACE_W: f32 = 2.0;
+        const DIAG_W: f32 = 1.0;
+        const STRENGTH_PER_BOND: f32 = 18.0;
+
+        let w = WIDTH as i32;
+        let h = HEIGHT as i32;
+        let is_earth: Vec<bool> = self.tiles.iter().map(|t| *t == Tile::Earth).collect();
+        let earth_at = |x: i32, y: i32| -> bool {
+            x >= 0 && y >= 0 && x < w && y < h && is_earth[y as usize * WIDTH + x as usize]
+        };
+        let down_weight = |x: i32, y: i32| -> f32 {
+            let mut s = 0.0;
+            if earth_at(x, y + 1) {
+                s += FACE_W;
+            }
+            if earth_at(x - 1, y + 1) {
+                s += DIAG_W;
+            }
+            if earth_at(x + 1, y + 1) {
+                s += DIAG_W;
+            }
+            s
+        };
+
+        let mut load = vec![0.0f32; WIDTH * HEIGHT];
+        for y in 0..h {
+            for x in 0..w {
+                if !earth_at(x, y) {
+                    continue;
+                }
+                let mut incoming = 0.0;
+                if y > 0 {
+                    for dx in [-1i32, 0, 1] {
+                        let ux = x + dx;
+                        let uy = y - 1;
+                        if !earth_at(ux, uy) {
+                            continue;
+                        }
+                        let total = down_weight(ux, uy);
+                        if total <= 0.0 {
+                            continue;
+                        }
+                        let bond = if dx == 0 { FACE_W } else { DIAG_W };
+                        incoming += load[uy as usize * WIDTH + ux as usize] * bond / total;
+                    }
+                }
+                load[y as usize * WIDTH + x as usize] = 1.0 + incoming;
+            }
+        }
+
+        let mut broken = vec![false; WIDTH * HEIGHT];
+        for y in 0..h - 1 {
+            for x in 0..w {
+                if !earth_at(x, y) {
+                    continue;
+                }
+                let dw = down_weight(x, y);
+                let idx = y as usize * WIDTH + x as usize;
+                let coh = self.cohesion[idx].max(1) as f32;
+                let capacity = dw * STRENGTH_PER_BOND * coh;
+                if dw == 0.0 || load[idx] > capacity {
+                    broken[idx] = true;
+                }
+            }
+        }
+
         let mut anchored = vec![false; WIDTH * HEIGHT];
         let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
-        let bottom = HEIGHT as i32 - 1;
-        for x in 0..WIDTH as i32 {
-            if self.tile(x, bottom) == Tile::Earth {
+        let bottom = h - 1;
+        for x in 0..w {
+            if earth_at(x, bottom) {
                 let idx = bottom as usize * WIDTH + x as usize;
                 anchored[idx] = true;
                 queue.push_back((x, bottom));
             }
         }
-        while let Some((x, y)) = queue.pop_front() {
-            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+        while let Some((cx, cy)) = queue.pop_front() {
+            for (nx, ny) in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
                     continue;
                 }
-                let idx = ny as usize * WIDTH + nx as usize;
-                if !anchored[idx] && self.tile(nx, ny) == Tile::Earth {
-                    anchored[idx] = true;
+                let ni = ny as usize * WIDTH + nx as usize;
+                if !anchored[ni] && earth_at(nx, ny) && !broken[ni] {
+                    anchored[ni] = true;
                     queue.push_back((nx, ny));
                 }
             }
         }
 
-        let mut a_cluster_id = vec![0u32; WIDTH * HEIGHT];
-        let mut a_next: u32 = 1;
-        for sy in (0..HEIGHT as i32).rev() {
-            for sx in 0..WIDTH as i32 {
-                let sidx = sy as usize * WIDTH + sx as usize;
-                if !anchored[sidx] || a_cluster_id[sidx] != 0 {
-                    continue;
-                }
-                let cid = a_next;
-                a_next += 1;
-                a_cluster_id[sidx] = cid;
-                let mut local: VecDeque<(i32, i32)> = VecDeque::new();
-                local.push_back((sx, sy));
-                while let Some((x, y)) = local.pop_front() {
-                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                        if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
-                            continue;
-                        }
-                        let ni = ny as usize * WIDTH + nx as usize;
-                        if !anchored[ni] || a_cluster_id[ni] != 0 {
-                            continue;
-                        }
-                        a_cluster_id[ni] = cid;
-                        local.push_back((nx, ny));
-                    }
-                }
-            }
-        }
-
-        if a_next > 1 {
-            let mut local_support = vec![0u16; WIDTH * HEIGHT];
-            for y in 0..HEIGHT {
-                let mut x = 0;
-                while x < WIDTH {
-                    let cid_here = a_cluster_id[y * WIDTH + x];
-                    if cid_here == 0 {
-                        x += 1;
-                        continue;
-                    }
-                    let start = x;
-                    while x < WIDTH && a_cluster_id[y * WIDTH + x] == cid_here {
-                        x += 1;
-                    }
-                    let len = (x - start) as u16;
-                    for cx in start..x {
-                        local_support[y * WIDTH + cx] = len;
-                    }
-                }
-            }
-            const STRENGTH: u64 = 100;
-            for x in 0..WIDTH {
-                let mut col_mass: u64 = 0;
-                let mut broken_at: Option<usize> = None;
-                let mut cluster_seen: u32 = 0;
-                for y in 0..HEIGHT {
-                    let idx = y * WIDTH + x;
-                    let cid = a_cluster_id[idx];
-                    if cid == 0 {
-                        continue;
-                    }
-                    if cid != cluster_seen {
-                        cluster_seen = cid;
-                        col_mass = 0;
-                    }
-                    let sup = local_support[idx] as u64;
-                    if sup > 0 && col_mass > sup.saturating_mul(STRENGTH) {
-                        let jitter = self.rng.random_range(0..=2);
-                        broken_at = Some(y.saturating_sub(jitter));
-                        break;
-                    }
-                    col_mass += 1;
-                }
-                if let Some(yb) = broken_at {
-                    for ay in 0..yb {
-                        let aidx = ay * WIDTH + x;
-                        if a_cluster_id[aidx] != 0 {
-                            anchored[aidx] = false;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut cluster_id = vec![0u32; WIDTH * HEIGHT];
-        let mut cluster_size: Vec<u32> = vec![0];
-        let mut next_id: u32 = 1;
-        for sy in 0..HEIGHT as i32 {
-            for sx in 0..WIDTH as i32 {
-                let sidx = sy as usize * WIDTH + sx as usize;
-                if anchored[sidx] || self.tile(sx, sy) != Tile::Earth || cluster_id[sidx] != 0 {
-                    continue;
-                }
-                let mut size: u32 = 0;
-                let mut local: VecDeque<(i32, i32)> = VecDeque::new();
-                local.push_back((sx, sy));
-                cluster_id[sidx] = next_id;
-                while let Some((x, y)) = local.pop_front() {
-                    size += 1;
-                    for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                        if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
-                            continue;
-                        }
-                        let nidx = ny as usize * WIDTH + nx as usize;
-                        if anchored[nidx]
-                            || cluster_id[nidx] != 0
-                            || self.tile(nx, ny) != Tile::Earth
-                        {
-                            continue;
-                        }
-                        cluster_id[nidx] = next_id;
-                        local.push_back((nx, ny));
-                    }
-                }
-                cluster_size.push(size);
-                next_id += 1;
-            }
-        }
-
         let mut to_fall: Vec<(i32, i32)> = Vec::new();
-        for y in 0..HEIGHT as i32 {
-            for x in 0..WIDTH as i32 {
-                if self.tile(x, y) != Tile::Earth {
+        for y in 0..h {
+            for x in 0..w {
+                if !earth_at(x, y) {
                     continue;
                 }
                 let idx = y as usize * WIDTH + x as usize;
@@ -1174,20 +1125,9 @@ impl Game {
                         self.cohesion[idx] = 1;
                     }
                     self.hang[idx] = 0;
-                    continue;
+                } else {
+                    to_fall.push((x, y));
                 }
-                let cid = cluster_id[idx] as usize;
-                if cid == 0 {
-                    continue;
-                }
-                let size = cluster_size[cid] as f64;
-                let coh = self.cohesion[idx].max(1) as f64;
-                let always_falls = cluster_size[cid] <= 4;
-                let p_fall = (size / (10.0 * coh * coh)).clamp(0.0, 1.0);
-                if !always_falls && !self.rng.random_bool(p_fall) {
-                    continue;
-                }
-                to_fall.push((x, y));
             }
         }
 
@@ -1196,7 +1136,7 @@ impl Game {
             if self.tile(x, y) != Tile::Earth {
                 continue;
             }
-            if y + 1 >= HEIGHT as i32 {
+            if y + 1 >= h {
                 continue;
             }
             if self.tile(x, y + 1) != Tile::Air {
