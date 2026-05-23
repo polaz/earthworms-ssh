@@ -34,10 +34,9 @@ const FRICTION_GRACE_TICKS: u64 = TICK_RATE * 3 / 20;
 const HANG_FALL_DELAY: u16 = TICK_RATE as u16;
 const TALUS: i32 = 2;
 const SLIDE_BASE_PROBABILITY: f64 = 0.55;
-const GROWTH_REGION_FRACTION: i32 = 8;
 const GROWTH_HEIGHT_CAP_PCT: i32 = 70;
-const GROWTH_MIN_BURST: usize = 3;
-const GROWTH_MAX_BURST: usize = 18;
+const GROWTH_MIN_BURST: usize = 6;
+const GROWTH_MAX_BURST: usize = 60;
 pub const MAX_HEALTH: i16 = 1000;
 const HEALTH_REGEN_TICKS: u64 = TICK_RATE * 20;
 pub const Y_ASPECT: f32 = 1.7;
@@ -348,7 +347,7 @@ impl Game {
             self.grow_terrain();
             let earth = self.earth_count();
             let fill = (earth as f32 / TERRAIN_CAP as f32).clamp(0.0, 1.0);
-            let delay_sec = 3.0 + fill * fill * 17.0;
+            let delay_sec = 3.0 + fill * fill * 25.0;
             let delay = (delay_sec * TICK_RATE as f32) as u64;
             self.next_growth_tick = self.tick_number + delay.max(TICK_RATE * 3);
         }
@@ -803,39 +802,33 @@ impl Game {
         let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
         let mut candidates: Vec<i32> = Vec::new();
         for x in 1..(WIDTH as i32 - 1) {
-            if let Some((_, top)) = self.supported_growth_site(x)
-                && top >= max_top_y
-            {
+            let Some((_, top)) = self.supported_growth_site(x) else {
+                continue;
+            };
+            if top >= max_top_y {
                 candidates.push(x);
             }
         }
         if candidates.is_empty() {
             return;
         }
-        let center = candidates[self.rng.random_range(0..candidates.len())];
-        let half = (WIDTH as i32 / GROWTH_REGION_FRACTION / 2).max(2);
-        let region_start = (center - half).max(1);
-        let region_end = (center + half).min(WIDTH as i32 - 1);
 
         let mut placed = 0;
         let mut attempts = 0;
-        while placed < burst && attempts < burst * 8 {
+        while placed < burst && !candidates.is_empty() && attempts < burst * 12 {
             attempts += 1;
-            let x = self.rng.random_range(region_start..region_end);
+            let idx = self.rng.random_range(0..candidates.len());
+            let x = candidates[idx];
             let Some((_, top)) = self.supported_growth_site(x) else {
+                candidates.swap_remove(idx);
                 continue;
             };
             if top < max_top_y {
+                candidates.swap_remove(idx);
                 continue;
             }
-            let left = self.surface_height(x - 1).unwrap_or(HEIGHT as i32);
-            let right = self.surface_height(x + 1).unwrap_or(HEIGHT as i32);
-            let neighbor_floor = left.max(right);
-            if top < neighbor_floor - 2 {
-                continue;
-            }
-            let max_push = ((neighbor_floor - top + 2).max(1) as usize).min(3);
-            let push = self.rng.random_range(1..=max_push).min(burst - placed) as i32;
+            let max_push = (3.min(burst - placed)).max(1);
+            let push = self.rng.random_range(1..=max_push) as i32;
             for k in 0..push {
                 let y = top - k;
                 if y < 0 {
