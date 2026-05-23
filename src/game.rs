@@ -800,12 +800,22 @@ impl Game {
             .clamp(GROWTH_MIN_BURST, GROWTH_MAX_BURST)
             .min(TERRAIN_CAP - earth);
 
-        let region_width = (WIDTH as i32 / GROWTH_REGION_FRACTION).max(2);
-        let region_start = self
-            .rng
-            .random_range(1..((WIDTH as i32 - 1).saturating_sub(region_width)).max(2));
-        let region_end = (region_start + region_width).min(WIDTH as i32 - 1);
         let max_top_y = HEIGHT as i32 * (100 - GROWTH_HEIGHT_CAP_PCT) / 100;
+        let mut candidates: Vec<i32> = Vec::new();
+        for x in 1..(WIDTH as i32 - 1) {
+            if let Some((_, top)) = self.supported_growth_site(x)
+                && top >= max_top_y
+            {
+                candidates.push(x);
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let center = candidates[self.rng.random_range(0..candidates.len())];
+        let half = (WIDTH as i32 / GROWTH_REGION_FRACTION / 2).max(2);
+        let region_start = (center - half).max(1);
+        let region_end = (center + half).min(WIDTH as i32 - 1);
 
         let mut placed = 0;
         let mut attempts = 0;
@@ -849,28 +859,66 @@ impl Game {
     }
 
     fn settle_terrain(&mut self) {
-        for y in (0..HEIGHT as i32 - 1).rev() {
+        let mut anchored = vec![false; WIDTH * HEIGHT];
+        let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
+        let bottom = HEIGHT as i32 - 1;
+        for x in 0..WIDTH as i32 {
+            if self.tile(x, bottom) == Tile::Earth {
+                let idx = bottom as usize * WIDTH + x as usize;
+                anchored[idx] = true;
+                queue.push_back((x, bottom));
+            }
+        }
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if nx < 0 || ny < 0 || nx >= WIDTH as i32 || ny >= HEIGHT as i32 {
+                    continue;
+                }
+                let idx = ny as usize * WIDTH + nx as usize;
+                if !anchored[idx] && self.tile(nx, ny) == Tile::Earth {
+                    anchored[idx] = true;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+
+        let mut to_fall: Vec<(i32, i32)> = Vec::new();
+        for y in 0..HEIGHT as i32 {
             for x in 0..WIDTH as i32 {
                 if self.tile(x, y) != Tile::Earth {
                     continue;
                 }
                 let idx = y as usize * WIDTH + x as usize;
-                if self.tile(x, y + 1) == Tile::Air {
+                if anchored[idx] {
+                    self.hang[idx] = 0;
+                } else {
                     self.hang[idx] = self.hang[idx].saturating_add(1);
                     if self.hang[idx] >= HANG_FALL_DELAY {
-                        let prev_cohesion = self.cohesion[idx].max(1);
-                        self.set_tile(x, y, Tile::Air);
-                        self.set_tile(x, y + 1, Tile::Earth);
-                        let below = (y + 1) as usize * WIDTH + x as usize;
-                        self.cohesion[below] = prev_cohesion;
-                        self.hang[below] = self.hang[idx];
-                        self.hang[idx] = 0;
+                        to_fall.push((x, y));
                     }
-                } else {
-                    self.hang[idx] = 0;
                 }
             }
         }
+
+        to_fall.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
+        for (x, y) in to_fall {
+            if self.tile(x, y) != Tile::Earth {
+                continue;
+            }
+            let mut ny = y;
+            while ny + 1 < HEIGHT as i32 && self.tile(x, ny + 1) == Tile::Air {
+                ny += 1;
+            }
+            if ny != y {
+                let prev_cohesion = self.cohesion[y as usize * WIDTH + x as usize].max(1);
+                self.set_tile(x, y, Tile::Air);
+                self.set_tile(x, ny, Tile::Earth);
+                let dst = ny as usize * WIDTH + x as usize;
+                self.cohesion[dst] = prev_cohesion;
+                self.hang[dst] = 0;
+            }
+        }
+
         self.slide_terrain();
         self.lift_buried_players();
     }
