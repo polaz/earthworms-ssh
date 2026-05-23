@@ -15,7 +15,7 @@
 </head>
 <body>
 <div id="wrap">
-  <div id="bar">worms//ssh web · A/D move · W/S aim · Space jump · Enter hold = charge · 1/2 weapon · <span id="status">connecting…</span></div>
+  <div id="bar">worms//ssh web · A/D move · W/S aim · Space jump · Enter hold = charge · 1/2 weapon · <span id="status">connecting…</span> · <span id="renderer">renderer ?</span></div>
   <div id="term"></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
@@ -43,15 +43,26 @@
   term.open(document.getElementById("term"));
   fit.fit();
 
-  try {
-    const webgl = new WebglAddon.WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
-    term.loadAddon(webgl);
-  } catch (_) {
+  const rendererLabel = document.getElementById("renderer");
+  const wantedRenderer = (params.get("renderer") || "webgl").toLowerCase();
+  let activeRenderer = "dom";
+  const tryWebgl = () => {
     try {
-      term.loadAddon(new CanvasAddon.CanvasAddon());
-    } catch (_) { /* fall back to DOM renderer */ }
-  }
+      const webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+      activeRenderer = "webgl";
+      return true;
+    } catch (_) { return false; }
+  };
+  const tryCanvas = () => {
+    try { term.loadAddon(new CanvasAddon.CanvasAddon()); activeRenderer = "canvas"; return true; }
+    catch (_) { return false; }
+  };
+  if (wantedRenderer === "canvas") { tryCanvas() || tryWebgl(); }
+  else if (wantedRenderer === "dom") { /* keep DOM */ }
+  else { tryWebgl() || tryCanvas(); }
+  rendererLabel.textContent = `renderer: ${activeRenderer}`;
 
   const status = document.getElementById("status");
   const proto = location.protocol === "https:" ? "wss" : "ws";
