@@ -1,5 +1,7 @@
 # earthworms//ssh
 
+![earthworms//ssh in action](docs/ews.png)
+
 A text-based artillery game, in the spirit of the classic Worms by Team17, but everything happens inside an SSH session or a single browser tab. No accounts, no goals, no leaderboards that matter, no point. Just blow up other people's pixels for a few minutes.
 
 > This is an unaffiliated, non-commercial fan tribute. The Worms franchise is © Team17 Group plc. No assets, sprites, sounds, level data, or trademarks are used here — only the artillery-game-with-worms concept that a couple of decades of arena shooters have made common vocabulary. If a Team17 lawyer wants this taken down, open an issue and it goes.
